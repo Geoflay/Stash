@@ -1,0 +1,36 @@
+[project]
+name = "videodownloader"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.10"
+dependencies = [
+    "flet>=1.0.4",
+    "yt-dlp",
+    "certifi",
+    "av",
+    "pillow"
+]
+
+[dependency-groups]
+dev = [
+    "flet-cli>=1.0.4",
+    "flet-desktop>=1.0.4",
+    "flet-web>=1.0.4",
+    "flet[test]>=1.0.4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.flet]
+org = "com.videodownloader"
+product = "videodownloader"
+company = "videodownloader"
+copyright = ""
+
+[tool.flet.app]
+path = "src"
+
+[tool.flet.android]
+proguard_default_rules = false

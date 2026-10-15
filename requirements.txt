@@ -1,0 +1,5 @@
+flet>=1.0.4
+yt-dlp
+certifi
+av
+pillow
