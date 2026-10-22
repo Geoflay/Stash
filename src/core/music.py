@@ -16,7 +16,7 @@ from pathlib import Path
 
 from core.web import urlopen
 
-USER_AGENT = "VideoDownloader/0.1 (personal downloads app)"  # MusicBrainz asks every app to name itself
+USER_AGENT = "Stash/0.1 (personal downloads app)"  # MusicBrainz asks every app to name itself
 MIN_SCORE = 90
 LENGTH_SLACK = 5  # seconds between the video and the recording found
 LYRICS_SLACK = 3

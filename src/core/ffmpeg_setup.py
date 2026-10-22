@@ -62,7 +62,7 @@ def _fetch(url, target, notify, done, total):
     """Download `url` into the file `target`; notify(fraction, message) after each piece (it raises
     Cancelled once Cancel is pressed)."""
     from core.web import urlopen
-    req = urllib.request.Request(url, headers={"User-Agent": "video-downloader"})
+    req = urllib.request.Request(url, headers={"User-Agent": "stash"})
     with urlopen(req, timeout=60) as resp, open(target, "wb") as out:
         size = int(resp.headers.get("Content-Length") or 0) or None
         got = 0

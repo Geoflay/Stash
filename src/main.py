@@ -1,4 +1,4 @@
-"""Video downloader: downloads videos and audio from YouTube, TikTok, Instagram, Twitter and every other site
+"""Stash: downloads videos and audio from YouTube, TikTok, Instagram, Twitter and every other site
 yt-dlp supports.
 
 Entry point for `flet run` and `flet build`. The code lives in two packages:

@@ -30,7 +30,7 @@ LOOK_SECONDS = 1.5  # how long answers are waited for
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Send to Video downloader</title>
+<title>Send to Stash</title>
 <style>
 body{font-family:system-ui,sans-serif;margin:0;padding:16px;background:#f6f6fb;color:#1b1b1f}
 @media (prefers-color-scheme:dark){body{background:#131318;color:#e5e1e9}textarea,input{background:#1f1f25;color:#e5e1e9}}
@@ -82,7 +82,7 @@ class LinkServer:
     `on_offer(url, name, device_id)` for those sent by a device that found this one on the Wi-Fi (the user
     accepts them, or trusts the device)."""
 
-    def __init__(self, key, on_link, name="Video downloader", on_offer=None):
+    def __init__(self, key, on_link, name="Stash", on_offer=None):
         self.key, self.on_link, self.name, self.on_offer = key, on_link, name, on_offer
         self.server = None
         self.files = {}  # secret -> path of a file sent to a phone

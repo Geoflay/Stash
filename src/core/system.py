@@ -100,7 +100,7 @@ def desktop_notify(title, message):
             return r.returncode == 0
         tool = shutil.which("notify-send")
         if tool:
-            r = subprocess.run([tool, "-a", "Video downloader", title, message], **kwargs)
+            r = subprocess.run([tool, "-a", "Stash", title, message], **kwargs)
             return r.returncode == 0
     except Exception:
         pass

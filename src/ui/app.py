@@ -1052,7 +1052,7 @@ async def show_welcome(app):
 
 
 async def main(page: ft.Page):
-    page.title = "Video downloader"
+    page.title = "Stash"
     app = App(page)
     install_language(app.settings.get("language"))  # before any text is given to a control
     app.apply_theme()

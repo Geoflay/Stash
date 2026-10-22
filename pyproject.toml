@@ -1,5 +1,5 @@
 [project]
-name = "videodownloader"
+name = "stash"
 version = "0.1.0"
 description = ""
 requires-python = ">=3.10"
@@ -32,8 +32,8 @@ markers = ["network: downloads from the real sites (skipped unless you run pytes
 
 [tool.flet]
 org = "com.videodownloader"
-product = "videodownloader"
-company = "videodownloader"
+product = "Stash"
+company = "Stash"
 copyright = ""
 
 [tool.flet.app]

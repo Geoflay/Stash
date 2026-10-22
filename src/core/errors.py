@@ -29,7 +29,7 @@ def error_report(error, url="", hint=None):
     the link, and the versions of the app's parts."""
     from yt_dlp.version import __version__ as ytdlp_version
     from core.backend import backend_label
-    lines = ["Video downloader: error report",
+    lines = ["Stash: error report",
              "Error: %s" % clean_error(error, limit=20000)]
     if url:
         lines.append("Link: %s" % url)

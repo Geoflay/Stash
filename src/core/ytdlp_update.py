@@ -89,7 +89,7 @@ YTDLP_CHECK_INTERVAL = 12 * 3600
 def latest_ytdlp_version():
     tag = None
     try:
-        req = urllib.request.Request(YTDLP_LATEST_PAGE, method="HEAD", headers={"User-Agent": "video-downloader"})
+        req = urllib.request.Request(YTDLP_LATEST_PAGE, method="HEAD", headers={"User-Agent": "stash"})
         with urlopen(req, timeout=15) as resp:
             found = re.search(r"/releases/tag/([^/?#]+)$", resp.geturl())
         tag = found.group(1) if found else None

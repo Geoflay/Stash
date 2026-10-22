@@ -26,6 +26,6 @@ def urlopen(req, timeout):
 
 
 def http_get(url, timeout=60):
-    req = urllib.request.Request(url, headers={"User-Agent": "video-downloader"})
+    req = urllib.request.Request(url, headers={"User-Agent": "stash"})
     with urlopen(req, timeout=timeout) as resp:
         return resp.read()

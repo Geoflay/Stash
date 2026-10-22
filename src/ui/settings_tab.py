@@ -573,7 +573,7 @@ class SettingsTab:
             await app.offer_restart()
         return app.section(
             "App updates",
-            ("Video downloader %s" % APP_VERSION, None),
+            ("Stash %s" % APP_VERSION, None),
             ft.Switch(label="Check for a new version at startup", value=bool(app.settings.get("app_check", True)),
                       on_change=lambda e: app.remember("app_check", bool(e.control.value))),
             row([ft.Button("Check now", icon=ft.Icons.REFRESH, on_click=self.check_app),
