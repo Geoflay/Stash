@@ -1,0 +1,43 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Puts the app in the Share menu of other apps. This invisible activity only keeps the shared text
+             and opens the app's own window: the app never runs twice. -->
+        <activity
+            android:name="com.videodownloader.sharetarget.ShareReceiverActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <!-- "Paste & download": a tile of the quick settings and a widget of the home screen. Both open the
+             activity above, which asks the app to download the link copied. -->
+        <service
+            android:name="com.videodownloader.sharetarget.PasteTileService"
+            android:exported="true"
+            android:icon="@drawable/videodownloader_paste"
+            android:label="Paste &amp; download"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name="com.videodownloader.sharetarget.PasteWidgetProvider"
+            android:exported="false"
+            android:label="Paste &amp; download">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/videodownloader_paste_widget_info" />
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,14 @@
+name: flet_file_drop
+description: Files dropped onto the window of a Flet app.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.2.3 <4.0.0'
+  flutter: ">=1.17.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flet: 1.0.4
+  desktop_drop: 0.7.1

@@ -1,0 +1,9 @@
+pyproject.toml
+src/flet_file_drop/__init__.py
+src/flet_file_drop.egg-info/PKG-INFO
+src/flet_file_drop.egg-info/SOURCES.txt
+src/flet_file_drop.egg-info/dependency_links.txt
+src/flet_file_drop.egg-info/requires.txt
+src/flet_file_drop.egg-info/top_level.txt
+src/flutter/flet_file_drop/pubspec.yaml
+src/flutter/flet_file_drop/lib/flet_file_drop.dart

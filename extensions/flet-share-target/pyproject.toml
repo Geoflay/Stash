@@ -1,0 +1,17 @@
+[project]
+name = "flet-share-target"
+version = "0.1.0"
+description = "Android: receive the links shared to the app from other apps (their Share button)."
+requires-python = ">=3.10"
+dependencies = ["flet"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The Flutter part (src/flutter/flet_share_target) goes into the wheel too: `flet build` picks it up from there.
+[tool.setuptools.package-data]
+"*" = ["**/*"]

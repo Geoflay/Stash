@@ -1,0 +1,20 @@
+name: flet_open_file
+description: Open files of an Android phone from a Flet app.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.2.3 <4.0.0'
+  flutter: ">=1.17.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flet: 1.0.4
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.videodownloader.openfile
+        pluginClass: OpenFilePlugin

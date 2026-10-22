@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: flet-open-file
+Version: 0.1.0
+Summary: Android: open a file of the phone with the app that plays or shows it.
+Requires-Python: >=3.10
+Requires-Dist: flet

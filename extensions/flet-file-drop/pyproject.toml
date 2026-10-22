@@ -1,0 +1,17 @@
+[project]
+name = "flet-file-drop"
+version = "0.1.0"
+description = "Computer: files dropped onto the window of a Flet app (from the file explorer)."
+requires-python = ">=3.10"
+dependencies = ["flet"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The Flutter part (src/flutter/flet_file_drop) goes into the wheel too: `flet build` picks it up from there.
+[tool.setuptools.package-data]
+"*" = ["**/*"]

@@ -1,0 +1,12 @@
+pyproject.toml
+src/flet_local_notification/__init__.py
+src/flet_local_notification.egg-info/PKG-INFO
+src/flet_local_notification.egg-info/SOURCES.txt
+src/flet_local_notification.egg-info/dependency_links.txt
+src/flet_local_notification.egg-info/requires.txt
+src/flet_local_notification.egg-info/top_level.txt
+src/flutter/flet_local_notification/pubspec.yaml
+src/flutter/flet_local_notification/android/build.gradle
+src/flutter/flet_local_notification/android/src/main/AndroidManifest.xml
+src/flutter/flet_local_notification/android/src/main/java/com/videodownloader/localnotification/LocalNotificationPlugin.java
+src/flutter/flet_local_notification/lib/flet_local_notification.dart

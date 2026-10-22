@@ -1,0 +1,17 @@
+[project]
+name = "flet-local-notification"
+version = "0.1.0"
+description = "Android: show a notification from a Flet app (for example when a download is finished)."
+requires-python = ">=3.10"
+dependencies = ["flet"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The Flutter part (src/flutter/flet_local_notification) goes into the wheel too: `flet build` picks it up from there.
+[tool.setuptools.package-data]
+"*" = ["**/*"]

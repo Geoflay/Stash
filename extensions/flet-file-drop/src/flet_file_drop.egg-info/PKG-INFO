@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: flet-file-drop
+Version: 0.1.0
+Summary: Computer: files dropped onto the window of a Flet app (from the file explorer).
+Requires-Python: >=3.10
+Requires-Dist: flet

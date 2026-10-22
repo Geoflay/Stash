@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: flet-share-target
+Version: 0.1.0
+Summary: Android: receive the links shared to the app from other apps (their Share button).
+Requires-Python: >=3.10
+Requires-Dist: flet

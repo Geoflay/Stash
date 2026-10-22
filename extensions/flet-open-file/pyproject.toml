@@ -1,0 +1,17 @@
+[project]
+name = "flet-open-file"
+version = "0.1.0"
+description = "Android: open a file of the phone with the app that plays or shows it."
+requires-python = ">=3.10"
+dependencies = ["flet"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The Flutter part (src/flutter/flet_open_file) goes into the wheel too: `flet build` picks it up from there.
+[tool.setuptools.package-data]
+"*" = ["**/*"]

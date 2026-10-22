@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: flet-local-notification
+Version: 0.1.0
+Summary: Android: show a notification from a Flet app (for example when a download is finished).
+Requires-Python: >=3.10
+Requires-Dist: flet

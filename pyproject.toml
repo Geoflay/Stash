@@ -7,8 +7,9 @@ dependencies = [
     "flet>=1.0.4",
     "yt-dlp",
     "certifi",
-    "av",
-    "pillow"
+    "mutagen",
+    "flet-video>=1.0.4",
+    "segno",
 ]
 
 [dependency-groups]
@@ -17,11 +18,17 @@ dev = [
     "flet-desktop>=1.0.4",
     "flet-web>=1.0.4",
     "flet[test]>=1.0.4",
+    "av",
+    "pillow",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["src"]
+testpaths = ["tests"]
+# Real downloads need the network and are slow: run them with `pytest -m network`.
+addopts = '-m "not network"'
+markers = ["network: downloads from the real sites (skipped unless you run pytest -m network)"]
 
 [tool.flet]
 org = "com.videodownloader"
@@ -34,3 +41,23 @@ path = "src"
 
 [tool.flet.android]
 proguard_default_rules = false
+dependencies = ["av", "pillow", "flet-permission-handler", "curl-cffi", "flet-share-target",
+                "flet-local-notification", "flet-open-file"]
+
+# Our own Flutter extensions (see extensions/): the app in the Share menu of other apps (Instagram, TikTok,
+# YouTube…), notifications, and opening a downloaded file.
+[tool.flet.android.dev_packages]
+flet-share-target = "extensions/flet-share-target"
+flet-local-notification = "extensions/flet-local-notification"
+flet-open-file = "extensions/flet-open-file"
+
+[tool.flet.android.permission]
+"android.permission.MANAGE_EXTERNAL_STORAGE" = true
+"android.permission.WRITE_EXTERNAL_STORAGE" = { maxSdkVersion = "29" }
+
+[tool.flet.windows]
+dependencies = ["av", "pillow", "curl-cffi", "flet-file-drop"]
+
+# Files dropped onto the window (see extensions/flet-file-drop).
+[tool.flet.windows.dev_packages]
+flet-file-drop = "extensions/flet-file-drop"

@@ -1,0 +1,12 @@
+pyproject.toml
+src/flet_open_file/__init__.py
+src/flet_open_file.egg-info/PKG-INFO
+src/flet_open_file.egg-info/SOURCES.txt
+src/flet_open_file.egg-info/dependency_links.txt
+src/flet_open_file.egg-info/requires.txt
+src/flet_open_file.egg-info/top_level.txt
+src/flutter/flet_open_file/pubspec.yaml
+src/flutter/flet_open_file/android/build.gradle
+src/flutter/flet_open_file/android/src/main/AndroidManifest.xml
+src/flutter/flet_open_file/android/src/main/java/com/videodownloader/openfile/OpenFilePlugin.java
+src/flutter/flet_open_file/lib/flet_open_file.dart
