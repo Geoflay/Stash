@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "x264", "dav1d", "mp3lame", "zlib"]
+    }
+  ]
+}

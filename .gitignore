@@ -1,0 +1,25 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+*.log
+*.local
+
+# Written by src-tauri/ffmpeg/build.sh for this machine
+/.cargo/config.toml
+
+# Local release build script
+/release.cmd
+
+# Android signing keys and packages
+*.jks
+*.keystore
+keystore.properties
+*.apk
+*.aab
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db

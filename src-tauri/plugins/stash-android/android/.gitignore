@@ -1,0 +1,3 @@
+/build
+# Copy of Tauri's Android API, written by the plugin's build.rs
+/.tauri

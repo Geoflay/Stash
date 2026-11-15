@@ -1,0 +1,56 @@
+[package]
+name = "stash-light"
+version = "0.1.0"
+description = "Download and edit videos"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "stash_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tauri-plugin-clipboard-manager = "2"
+ureq = "3.5.1"
+ffmpeg-next = { version = "9.1.0", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling", "static"] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# bindgen overflows its stack on FFmpeg's headers when built unoptimized.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
+
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+opt-level = 1
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-stash-android = { path = "plugins/stash-android" }
+
+[target."cfg(windows)".dependencies]
+tauri-plugin-opener = "2"
