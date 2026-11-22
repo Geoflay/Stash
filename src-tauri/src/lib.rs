@@ -2,6 +2,7 @@ mod edit;
 mod extractor;
 mod jobs;
 mod media;
+mod priority;
 mod progress;
 mod settings;
 mod tiktok;
@@ -39,6 +40,11 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, Failure> {
     app.path().app_data_dir().map_err(Failure::io)
 }
 
+/// The settings saved, the defaults for those that are not.
+fn saved_settings(app: &AppHandle) -> Result<Settings, Failure> {
+    Ok(settings::load(&data_dir(app)?))
+}
+
 /// Moves a file; copies it when it is on another drive.
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to).or_else(|_| std::fs::copy(from, to).map(|_| ()))
@@ -49,9 +55,19 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, Failure> +
     tauri::async_runtime::spawn_blocking(work).await.map_err(Failure::io)?
 }
 
+/// Calls the Android plugin, off the main thread.
+#[cfg(target_os = "android")]
+async fn on_phone<T: Send + 'static>(
+    app: AppHandle,
+    call: impl FnOnce(&tauri_plugin_stash_android::Stash<tauri::Wry>) -> Result<T, tauri::plugin::mobile::PluginInvokeError> + Send + 'static,
+) -> Result<T, Failure> {
+    use tauri_plugin_stash_android::StashExt;
+    blocking(move || call(app.stash()).map_err(Failure::io)).await
+}
+
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Result<Settings, Failure> {
-    let mut settings = settings::load(&data_dir(&app)?);
+    let mut settings = saved_settings(&app)?;
     if cfg!(windows) && settings.download_dir.is_none() {
         settings.download_dir = app.path().download_dir().ok();
     }
@@ -190,10 +206,10 @@ async fn open_media(app: AppHandle, path: String) -> Result<LocalMedia, Failure>
 }
 
 /// A copy of an opened file the preview can play, when the webview can't play it (MKV,
-/// HEVC, AVI…), its progress sent on `on_progress`. Asking for another one stops the one
-/// being made.
+/// HEVC, AVI…), its progress sent on `on_progress`; `None` for a video played in parts
+/// (`preview_part`). Asking for another one stops the one being made.
 #[tauri::command]
-async fn preview_media(app: AppHandle, path: String, on_progress: tauri::ipc::Channel<f64>) -> Result<String, Failure> {
+async fn preview_media(app: AppHandle, path: String, on_progress: tauri::ipc::Channel<f64>) -> Result<Option<String>, Failure> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static LATEST: AtomicU32 = AtomicU32::new(0);
     let id = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
@@ -217,11 +233,35 @@ async fn preview_media(app: AppHandle, path: String, on_progress: tauri::ipc::Ch
                 let _ = on_progress.send(fraction);
             }
         };
-        media::preview(&file, &out, &probe, &stop, &mut progress).inspect_err(|_| {
+        let written = media::preview(&file, &out, &probe, &stop, &mut progress).inspect_err(|_| {
             let _ = std::fs::remove_file(&out);
         })?;
+        if !written {
+            return Ok(None);
+        }
         app.asset_protocol_scope().allow_file(&out).map_err(Failure::io)?;
-        Ok(out.display().to_string())
+        Ok(Some(out.display().to_string()))
+    })
+    .await
+}
+
+/// `seconds` of a video's preview from `from`, as a fragmented MP4. Asking for another part
+/// stops the one being made: the preview wants the one where it now plays.
+#[tauri::command]
+async fn preview_part(app: AppHandle, path: String, from: f64, seconds: f64) -> Result<tauri::ipc::Response, Failure> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LATEST: AtomicU32 = AtomicU32::new(0);
+    let id = LATEST.fetch_add(1, Ordering::Relaxed) + 1;
+    blocking(move || {
+        let file = PathBuf::from(&path);
+        let probe = media::probe_supported(&file)?;
+        let card = saved_settings(&app)?.gpu;
+        let out = extractor::work_dir(&app)?.join(format!("part-{id}.mp4"));
+        let stop = || LATEST.load(Ordering::Relaxed) != id;
+        let made = media::preview_part(&file, &out, &probe, from, seconds, card, &stop);
+        let bytes = made.and_then(|()| std::fs::read(&out).map_err(Failure::io));
+        let _ = std::fs::remove_file(&out);
+        Ok(tauri::ipc::Response::new(bytes?))
     })
     .await
 }
@@ -248,19 +288,13 @@ async fn cancel_download(app: AppHandle, id: u32) -> Result<(), Failure> {
 /// Opens a finished file with the default app.
 #[tauri::command]
 async fn open_file(app: AppHandle, path: String) -> Result<(), Failure> {
-    blocking(move || {
-        #[cfg(windows)]
-        {
-            let _ = app;
-            tauri_plugin_opener::open_path(&path, None::<&str>).map_err(Failure::io)
-        }
-        #[cfg(target_os = "android")]
-        {
-            use tauri_plugin_stash_android::StashExt;
-            app.stash().open(&path).map_err(Failure::io)
-        }
-    })
-    .await
+    #[cfg(target_os = "android")]
+    return on_phone(app, move |stash| stash.open(&path)).await;
+    #[cfg(windows)]
+    {
+        let _ = app;
+        blocking(move || tauri_plugin_opener::open_path(&path, None::<&str>).map_err(Failure::io)).await
+    }
 }
 
 /// Renames a finished file (or photo folder) after `title`; returns its new path or URI.
@@ -273,16 +307,28 @@ async fn rename_file(app: AppHandle, path: String, title: String) -> Result<Stri
 #[tauri::command]
 async fn take_shared(app: AppHandle) -> Result<Option<String>, Failure> {
     #[cfg(target_os = "android")]
-    return blocking(move || {
-        use tauri_plugin_stash_android::StashExt;
-        app.stash().take_shared().map_err(Failure::io)
-    })
-    .await;
+    return on_phone(app, |stash| stash.take_shared()).await;
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
         Ok(None)
     }
+}
+
+/// Files opened with Explorer's "Edit with Stash" (Windows), not yet taken by the Edit tab.
+#[derive(Default)]
+struct Opened(std::sync::Mutex<Vec<String>>);
+
+/// The files after `--edit` in a command line, made whole against `cwd`.
+fn edit_args(args: &[String], cwd: &Path) -> Vec<String> {
+    args.iter().skip_while(|arg| *arg != "--edit").skip(1).map(|file| cwd.join(file).display().to_string()).collect()
+}
+
+/// The files opened with "Edit with Stash" since last asked; an `opened` event tells the
+/// webview of those that come while it runs.
+#[tauri::command]
+fn take_opened(opened: State<Opened>) -> Vec<String> {
+    std::mem::take(&mut *opened.0.lock().unwrap())
 }
 
 /// Android: a `shared` event tells the webview when another app shares a text to this one.
@@ -309,11 +355,7 @@ fn listen_for_shares(app: &AppHandle) {
 #[tauri::command]
 async fn system_bars(app: AppHandle, dark: bool) -> Result<(), Failure> {
     #[cfg(target_os = "android")]
-    return blocking(move || {
-        use tauri_plugin_stash_android::StashExt;
-        app.stash().system_bars(dark).map_err(Failure::io)
-    })
-    .await;
+    return on_phone(app, move |stash| stash.system_bars(dark)).await;
     #[cfg(not(target_os = "android"))]
     {
         let _ = (app, dark);
@@ -340,11 +382,7 @@ async fn reveal_file(path: String) -> Result<(), Failure> {
 #[tauri::command]
 async fn share_file(app: AppHandle, path: String) -> Result<(), Failure> {
     #[cfg(target_os = "android")]
-    return blocking(move || {
-        use tauri_plugin_stash_android::StashExt;
-        app.stash().share(&path).map_err(Failure::io)
-    })
-    .await;
+    return on_phone(app, move |stash| stash.share(&path)).await;
     #[cfg(not(target_os = "android"))]
     {
         let _ = (app, path);
@@ -352,19 +390,53 @@ async fn share_file(app: AppHandle, path: String) -> Result<(), Failure> {
     }
 }
 
+/// Removes a previous session's leftovers (info files, unfinished downloads) from `work`
+/// without holding up the window: moved aside at once, so new jobs start in an empty
+/// folder, then deleted in the background with those of a session that closed meanwhile.
+fn clear_leftovers(work: &Path) {
+    let (Some(parent), Some(name)) = (work.parent(), work.file_name()) else { return };
+    let old = format!("{}-old", name.to_string_lossy());
+    let _ = std::fs::rename(work, parent.join(format!("{old}-{}", std::process::id())));
+    let _ = std::fs::create_dir_all(work);
+    let parent = parent.to_path_buf();
+    std::thread::spawn(move || {
+        for entry in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&old) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // "Edit with Stash" on files while the app runs: they go to the window open, brought up.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        use tauri::Emitter;
+        app.state::<Opened>().0.lock().unwrap().extend(edit_args(&args, Path::new(&cwd)));
+        let _ = app.emit("opened", ());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init());
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri_plugin_stash_android::init());
     builder
         .manage(Jobs::default())
+        .manage(Opened::default())
         .setup(|app| {
-            // Leftovers from a previous session: info files and unfinished downloads.
+            // The files this launch was opened with.
+            let args: Vec<String> = std::env::args().collect();
+            let cwd = std::env::current_dir().unwrap_or_default();
+            app.state::<Opened>().0.lock().unwrap().extend(edit_args(&args, &cwd));
             if let Ok(work) = extractor::work_dir(app.handle()) {
-                let _ = std::fs::remove_dir_all(work);
+                clear_leftovers(&work);
             }
             #[cfg(target_os = "android")]
             {
@@ -372,7 +444,7 @@ pub fn run() {
                 listen_for_shares(app.handle());
             }
             let handle = app.handle().clone();
-            let settings = data_dir(&handle).map(|dir| settings::load(&dir)).unwrap_or_default();
+            let settings = saved_settings(&handle).unwrap_or_default();
             app.state::<Jobs>().set_limit(settings.max_jobs);
             if settings.auto_update {
                 std::thread::spawn(move || extractor::update(&handle));
@@ -391,6 +463,7 @@ pub fn run() {
             analyze,
             open_media,
             preview_media,
+            preview_part,
             start_download,
             start_edit,
             cancel_download,
@@ -399,8 +472,45 @@ pub fn run() {
             reveal_file,
             share_file,
             system_bars,
+            take_opened,
             take_shared
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leftovers_cleared() {
+        let root = std::env::temp_dir().join(format!("stash-leftovers-{}", std::process::id()));
+        let work = root.join("work");
+        std::fs::create_dir_all(work.join("job-1")).unwrap();
+        std::fs::write(work.join("job-1").join("video.mp4"), b"part").unwrap();
+        std::fs::create_dir_all(root.join("work-old-1")).unwrap();
+        clear_leftovers(&work);
+        // At once: an empty folder for the new jobs.
+        assert_eq!(std::fs::read_dir(&work).unwrap().count(), 0);
+        for _ in 0..100 {
+            if std::fs::read_dir(&root).unwrap().count() == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["work"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_after_edit() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let cwd = Path::new(r"C:\videos");
+        assert!(edit_args(&args(&["stash.exe"]), cwd).is_empty());
+        let full = r"D:\clips\a b.mp4";
+        assert_eq!(edit_args(&args(&["stash.exe", "--edit", full]), cwd), [full]);
+        assert_eq!(edit_args(&args(&["stash.exe", "--edit", "c.mkv"]), cwd), [cwd.join("c.mkv").display().to_string()]);
+    }
 }

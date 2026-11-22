@@ -82,13 +82,39 @@
     "ytdlpUpToDate": "{{version}} · up to date",
     "autoUpdate": "Update at startup",
     "codecs": "Codecs",
+    "videoCodec": "Video codec",
+    "videoCodecs": {
+      "h264": "H.264",
+      "av1": "AV1"
+    },
     "preset": "Encoding speed",
-    "presets": {
+    "h264Presets": {
+      "ultrafast": "Ultrafast",
+      "superfast": "Superfast",
       "veryfast": "Very fast",
       "faster": "Faster",
+      "fast": "Fast",
       "medium": "Medium",
-      "slow": "Slow"
+      "slow": "Slow",
+      "slower": "Slower",
+      "veryslow": "Very slow",
+      "placebo": "Placebo"
     },
+    "numberedPresets": "{{preset}}",
+    "numberedPresets_slowest": "{{preset}} · Slowest, best",
+    "numberedPresets_fastest": "{{preset}} · Fastest",
+    "encoding": "Encoding",
+    "priority": "Priority",
+    "priorities": {
+      "idle": "Low",
+      "belowNormal": "Below normal",
+      "normal": "Normal",
+      "aboveNormal": "Above normal",
+      "high": "High"
+    },
+    "gpu": "Use the graphics card",
+    "gpuPreset": "Graphics card speed",
+    "gpuHint": "Much faster and frees the processor, but less detail than the slow speeds at the same size, and a less exact size limit. NVIDIA or AMD only.",
     "queue": "Queue",
     "maxJobs": "Jobs at once",
     "maxJobsHint": "Downloads and edits that run at the same time; the others wait.",
@@ -117,7 +143,7 @@
   "errors": {
     "io": "Something went wrong: {{detail}}",
     "private": "This video is private.",
-    "blocked": "YouTube is blocking this connection for now. Wait a while, or import a cookies.txt file in Settings.",
+    "blocked": "The site is blocking this connection for now. Wait a while, or import a cookies.txt file in Settings.",
     "login": "This content needs a signed-in account. Import a cookies.txt file in Settings.",
     "unsupported": "This link is not supported. Check it, or update yt-dlp in Settings.",
     "update": "yt-dlp could not read this page. Update yt-dlp in Settings.",
@@ -125,6 +151,7 @@
     "playlist": "Playlists are not supported. Paste the link of a single video.",
     "live": "Live streams cannot be downloaded.",
     "noStream": "No MP4 stream is available for this link.",
+    "noSound": "This video has no sound.",
     "updateFailed": "yt-dlp could not be updated: {{detail}}",
     "cookies": "This is not a cookies.txt file (Netscape format).",
     "encode": "Re-encoding failed: the file may be damaged, or hold a track the app can't convert.",
@@ -188,6 +215,7 @@
     "eta": "{{time}} left",
     "mux": "Finishing…",
     "done": "Done",
+    "encodedIn": "encoded in {{time}}",
     "cancelled": "Cancelled",
     "failed": "Failed",
     "cancel": "Cancel",

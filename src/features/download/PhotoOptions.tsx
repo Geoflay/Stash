@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Choice, rowClass } from "@/components/options-panel";
 import { Input } from "@/components/ui/input";
+import { positiveNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { setOptions, slideSeconds, slideSound, useDownloads, type PhotoMode } from "./store";
 
@@ -63,8 +64,7 @@ export function PhotoOptions() {
             step={0.5}
             value={photoSeconds ?? ""}
             onChange={(e) => {
-              const seconds = Number(e.target.value);
-              useDownloads.setState({ photoSeconds: e.target.value && seconds > 0 ? seconds : null });
+              useDownloads.setState({ photoSeconds: positiveNumber(e.target.value) });
               setOptions({ start: null, end: null });
             }}
             placeholder={t("options.auto", { seconds: Math.round(auto * 10) / 10 })}

@@ -3,7 +3,8 @@
     {
       "name": "ffmpeg",
       "default-features": false,
-      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "x264", "dav1d", "mp3lame", "zlib"]
+      "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "x264", "svt-av1", "dav1d", "mp3lame", "zlib",
+        {"name": "nvcodec", "platform": "windows"}, {"name": "amf", "platform": "windows"}]
     }
   ]
 }

@@ -2,6 +2,7 @@ import { Loader2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { Failure } from "@/features/settings/settings";
+import { cn } from "@/lib/utils";
 
 /** An error message, read out when it appears. */
 export function ErrorNote({ error }: { error: Failure }) {
@@ -11,6 +12,11 @@ export function ErrorNote({ error }: { error: Failure }) {
       {t(error.key, error.params)}
     </p>
   );
+}
+
+/** A short note under an option. */
+export function Hint({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={cn("text-xs text-muted-foreground", className)}>{children}</p>;
 }
 
 /** A line saying something is under way. */

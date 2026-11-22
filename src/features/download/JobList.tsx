@@ -22,9 +22,11 @@ function Status({ job }: { job: Job }) {
       </div>
     );
   }
-  // A finished job's note: the file came out over the size limit.
-  if (job.step === "done" && job.error) {
-    return <p className="text-xs text-muted-foreground">{t(job.error.key, job.error.params)}</p>;
+  if (job.step === "done") {
+    // A note when the file came out over the size limit, and how long the encode took.
+    const parts = [job.error ? t(job.error.key, job.error.params) : t("jobs.done")];
+    if (job.encoded != null) parts.push(t("jobs.encodedIn", { time: formatDuration(Math.max(1, job.encoded)) }));
+    return <p className="text-xs text-muted-foreground">{parts.join(" · ")}</p>;
   }
   let text: string = t(`jobs.${job.step}`);
   if (job.step === "download" && job.fraction !== null) {

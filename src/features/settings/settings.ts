@@ -1,12 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { AudioCodec, Format } from "@/features/download/store";
+import type { AudioCodec, Format, VideoCodec } from "@/features/download/store";
 
 export type Theme = "system" | "light" | "dark";
 
-/** How hard a re-encode works, fastest first. */
-export const ENCODER_PRESETS = ["veryfast", "faster", "medium", "slow"] as const;
-export type EncoderPreset = (typeof ENCODER_PRESETS)[number];
+/** The picture codecs a re-encode can write. */
+export const VIDEO_CODECS = ["h264", "av1"] as const satisfies readonly VideoCodec[];
+export type EncodedCodec = (typeof VIDEO_CODECS)[number];
+
+/** How hard x264 works, fastest first. */
+export const H264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"] as const;
+export type H264Preset = (typeof H264_PRESETS)[number];
+
+/** How hard SVT-AV1 works: 0 is the slowest and best, 13 the fastest. */
+export const AV1_PRESETS = Array.from({ length: 14 }, (_, i) => i);
+
+/** How hard the graphics card works: 1 is the fastest, 7 the slowest and best. */
+export const GPU_PRESETS = Array.from({ length: 7 }, (_, i) => i + 1);
+
+/** The priority encodes run at, lowest first (Windows' priority classes, but Realtime). */
+export const PRIORITIES = ["idle", "belowNormal", "normal", "aboveNormal", "high"] as const;
+export type Priority = (typeof PRIORITIES)[number];
 
 /** Options saved under a name, offered in the Download and Edit tabs (all but the extract). */
 export interface Preset {
@@ -31,10 +45,18 @@ export interface Settings {
   theme: Theme;
   /** Update yt-dlp when the app starts. */
   autoUpdate: boolean;
-  /** The sound codec a re-encode writes (the picture is always H.264). */
+  /** The sound codec a re-encode writes. */
   audioCodec: AudioCodec;
-  /** How hard a re-encode works. */
-  preset: EncoderPreset;
+  /** The picture codec a re-encode writes. */
+  videoCodec: EncodedCodec;
+  /** How hard each encoder works. */
+  h264Preset: H264Preset;
+  av1Preset: number;
+  /** The priority encodes run at. */
+  encodingPriority: Priority;
+  /** Encode with the graphics card when it can (Windows only). */
+  gpu: boolean;
+  gpuPreset: number;
   /** Jobs of the queue that run at once. */
   maxJobs: number;
   /** Cut the parts SponsorBlock lists out of YouTube downloads. */

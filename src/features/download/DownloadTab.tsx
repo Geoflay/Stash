@@ -3,15 +3,15 @@ import { ClipboardPaste, Download, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActionBar } from "@/components/action-bar";
+import { Card, TabColumns } from "@/components/card";
 import { EditableTitle } from "@/components/editable-title";
 import { ExtractPlayer, MiniPlayer } from "@/components/media-preview";
 import { Busy, ErrorNote } from "@/components/notice";
-import { EditOptions, FormatOptions, panelClass, Row } from "@/components/options-panel";
+import { EditOptions, formatName, FormatOptions, panelClass, Row } from "@/components/options-panel";
 import { PresetRow } from "@/components/preset-row";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatDuration, formatSize } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { formatDuration, formatSize, joinDetails } from "@/lib/format";
 import { useSettings } from "@/features/settings/settings";
 import { PhotoOptions } from "./PhotoOptions";
 import {
@@ -38,13 +38,11 @@ import {
 /** The link's thumbnail, title, author and length. */
 function MediaCard({ media }: { media: Media }) {
   const { t } = useTranslation();
-  const details = [
+  const details = joinDetails([
     media.author,
     media.duration !== null && formatDuration(media.duration),
     media.photos.length > 0 && t("download.photoCount", { count: media.photos.length }),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  ]);
   return (
     <div className="flex gap-3">
       {media.thumbnail && (
@@ -90,13 +88,11 @@ export function DownloadTab() {
     : [];
 
   const choice = selectedChoice(state);
-  const details = [
-    photoPost ? t(`options.photoModes.${photoMode}`) : t(`options.formats.${format}`),
+  const details = joinDetails([
+    photoPost ? t(`options.photoModes.${photoMode}`) : formatName(t, format),
     !photoPost && !sound && choice?.height && t("options.height", { height: choice.height }),
     size !== null && t("download.estimate", { size: formatSize(size) }),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  ]);
 
   async function paste() {
     const text = await readText().catch(() => "");
@@ -121,8 +117,8 @@ export function DownloadTab() {
   }, []);
 
   return (
-    <div className={cn("mx-auto grid w-full grid-cols-1 gap-3 lg:items-start", media ? "max-w-5xl lg:grid-cols-2" : "max-w-2xl")}>
-      <section className="grid gap-3 rounded-xl border bg-card p-3 sm:p-4">
+    <TabColumns wide={media !== null}>
+      <Card>
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -160,10 +156,10 @@ export function DownloadTab() {
         ) : (
           !analyzing && <p className="text-sm text-muted-foreground">{t("download.empty")}</p>
         )}
-      </section>
+      </Card>
 
       {media && (
-        <section className="grid gap-3 rounded-xl border bg-card p-3 sm:p-4">
+        <Card>
           <div className={panelClass}>
             {photoPost ? (
               <PhotoOptions />
@@ -192,7 +188,7 @@ export function DownloadTab() {
                   if ("start" in patch && preview) setPreviewed(preview);
                 }}
                 canMute={photoPost ? photoMode !== "sound" : !sound}
-                fps={photoPost || sound ? null : (selectedChoice(state)?.fps ?? null)}
+                fps={photoPost || sound ? null : (choice?.fps ?? null)}
                 sizeLimit={photoPost || !isLossless(output)}
               />
             )}
@@ -204,7 +200,7 @@ export function DownloadTab() {
               </Row>
             )}
           </div>
-        </section>
+        </Card>
       )}
 
       {media && previewing && (
@@ -239,6 +235,6 @@ export function DownloadTab() {
           </Button>
         </ActionBar>
       )}
-    </div>
+    </TabColumns>
   );
 }

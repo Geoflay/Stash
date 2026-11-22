@@ -1,7 +1,7 @@
 import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect } from "react";
 import { create } from "zustand";
+import { useSubscription } from "@/lib/events";
 import { findPreset, useSettings, type Failure, type Preset, type Settings } from "@/features/settings/settings";
 
 /** One raw stream and the tracks taken from it. */
@@ -66,6 +66,8 @@ export interface JobEvent {
   /** The finished file: a path on Windows, a content URI on Android. */
   path: string | null;
   error: Failure | null;
+  /** On a finished job, the seconds spent encoding, when it was encoded. */
+  encoded?: number | null;
 }
 
 /** The command and request that started a job, to start it again. */
@@ -131,6 +133,12 @@ export function withFormat(output: Output, format: Format): Output {
 /** The file saved as `format`, in the sound codec of the settings (AAC until they load). */
 export function outputOf(format: Format, settings: Pick<Settings, "audioCodec"> | null): Output {
   return withFormat({ format: "mp4", audioCodec: settings?.audioCodec ?? "aac" }, format);
+}
+
+/** The picture codec a re-encode writes into `format`: the settings' one, H.264 in MOV
+ * (which holds no AV1) or until they load. */
+export function encodedCodec(format: Format, settings: Pick<Settings, "videoCodec"> | null): VideoCodec {
+  return settings?.videoCodec === "av1" && format !== "mov" ? "av1" : "h264";
 }
 
 /** The sound-only file of the settings' sound codec (AAC: M4A). */
@@ -209,19 +217,34 @@ export function requestOptions(options: Options, output: Output) {
   return { ...options, ...output };
 }
 
-/** Whether `patch` changes an option presets set (all but the extract). */
-export function setsPresetOption(patch: object): boolean {
-  return Object.keys(patch).some((key) => key !== "start" && key !== "end");
+/** The edits `patch` makes, for a tab's store: the preset chosen is let go when the patch
+ * changes an option presets set (all but the extract). */
+export function patchOptions(patch: Partial<Options>) {
+  const presetOption = Object.keys(patch).some((key) => key !== "start" && key !== "end");
+  return ({ options, preset }: { options: Options; preset: string | null }) => ({
+    options: { ...options, ...patch },
+    preset: presetOption ? null : preset,
+  });
 }
 
 export function setOptions(patch: Partial<Options>) {
-  set(({ options, preset }) => ({ options: { ...options, ...patch }, preset: setsPresetOption(patch) ? null : preset }));
+  set(patchOptions(patch));
+}
+
+/** The edits a preset sets. */
+export function presetEdits({ mute, speed, fps, maxMb }: Pick<Options, "mute" | "speed" | "fps" | "maxMb">) {
+  return { mute, speed, fps, maxMb };
 }
 
 /** The options a preset made now would hold. */
 export function presetOptions({ format, quality, options }: DownloadState): Omit<Preset, "name"> {
-  const { mute, speed, fps, maxMb } = options;
-  return { format, height: quality === "best" ? null : quality, mute, speed, fps, maxMb };
+  return { format, height: quality === "best" ? null : quality, ...presetEdits(options) };
+}
+
+/** `size` (unknown: `null`) capped by the size limit of `options`, which FLAC and WAV sound don't have. */
+export function capSize(size: number | null, options: Options, output: Output): number | null {
+  const limit = options.maxMb && !isLossless(output) ? options.maxMb * 1e6 : null;
+  return size === null || (limit !== null && limit < size) ? limit : size;
 }
 
 /** The highest quality of `media` up to `height` (its lowest if all are higher). */
@@ -239,12 +262,11 @@ export function applyPreset(preset: Preset) {
   set(({ media, format, options }) => {
     const wanted = preset.format === "original" ? format : preset.format;
     const can = !media || (isAudioFormat(wanted) ? media.audio !== null : media.qualities.length > 0);
-    const { mute, speed, fps, maxMb } = preset;
     return {
       preset: preset.name,
       format: can ? wanted : format,
       quality: qualityUpTo(media, preset.height),
-      options: { ...options, mute, speed, fps, maxMb },
+      options: { ...options, ...presetEdits(preset) },
     };
   });
 }
@@ -339,9 +361,8 @@ export function estimate(state: DownloadState, output: Output, cuts: Cut[] = [])
   const choice = selectedChoice(state);
   const { options, media } = state;
   const sound = isAudioFormat(output.format);
-  const limit = options.maxMb && !isLossless(output) ? options.maxMb * 1e6 : null;
   const copied = sound ? output.format === "m4a" : output.audioCodec === "aac";
-  if (choice?.size == null || !copied) return limit;
+  if (choice?.size == null || !copied) return capSize(null, options, output);
   // Fewer frames, about that much less picture.
   const frames = !sound && options.fps !== null && choice.fps ? Math.min(options.fps / choice.fps, 1) : 1;
   let size = 0;
@@ -351,8 +372,7 @@ export function estimate(state: DownloadState, output: Output, cuts: Cut[] = [])
   }
   const duration = media?.duration;
   if (duration) size *= ((options.end ?? duration) - (options.start ?? 0) - cutLength(cuts)) / duration;
-  size /= options.speed;
-  return limit ? Math.min(size, limit) : size;
+  return capSize(size / options.speed, options, output);
 }
 
 /** Adds or updates a job; events can arrive before `start_download` returns. */
@@ -404,9 +424,14 @@ export function clearFinished() {
   useJobs.setState(({ jobs }) => ({ jobs: jobs.filter(isActive) }));
 }
 
+/** The latest analysis: one started before it (a link shared while another was analyzed) is dropped. */
+let analysis = 0;
+
 export async function analyze() {
   const url = useDownloads.getState().url.trim();
   if (!url) return;
+  const run = ++analysis;
+  const latest = () => run === analysis;
   set(({ options }) => ({
     analyzing: true,
     error: null,
@@ -418,6 +443,7 @@ export async function analyze() {
   }));
   try {
     const media = await invoke<Media>("analyze", { url });
+    if (!latest()) return;
     // A link with no video saves the sound, in the codec of the settings.
     const { format } = useDownloads.getState();
     const sound = isAudioFormat(format) ? format : soundFile(useSettings.getState().settings);
@@ -426,9 +452,9 @@ export async function analyze() {
     const preset = findPreset(useDownloads.getState().preset);
     if (preset && !media.photos.length) applyPreset(preset);
   } catch (error) {
-    set({ error: error as Failure });
+    if (latest()) set({ error: error as Failure });
   } finally {
-    set({ analyzing: false });
+    if (latest()) set({ analyzing: false });
   }
 }
 
@@ -451,15 +477,14 @@ export function jobAction(command: "cancel_download" | "open_file" | "reveal_fil
 
 /** Keeps the job list in step with the core's `job` events. */
 export function useJobEvents() {
-  useEffect(() => {
-    const unlisten = listen<JobEvent>("job", ({ payload }) => {
+  useSubscription(() =>
+    listen<JobEvent>("job", ({ payload }) => {
       upsert(payload.id, payload);
       const job = useJobs.getState().jobs.find((j) => j.id === payload.id);
       if (job?.renamed && payload.step === "done" && payload.path) {
         upsert(job.id, { renamed: false });
         void renameFile(job.id, payload.path, job.title);
       }
-    });
-    return () => void unlisten.then((stop) => stop());
-  }, []);
+    }),
+  );
 }

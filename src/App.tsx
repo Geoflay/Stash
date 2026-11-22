@@ -8,9 +8,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DownloadTab } from "@/features/download/DownloadTab";
 import { JobList } from "@/features/download/JobList";
 import { EditTab } from "@/features/edit/EditTab";
-import { useEdit, useFileDrop, type Tab } from "@/features/edit/store";
+import { openFiles, useEdit, useFileDrop, type Tab } from "@/features/edit/store";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { analyze, isActive, useDownloads, useJobEvents, useJobs } from "@/features/download/store";
+import { useSubscription } from "@/lib/events";
 import { isAndroid } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { changeSettings, loadSettings, useSettings, type Settings } from "@/features/settings/settings";
@@ -32,8 +33,8 @@ function useTheme(theme: Settings["theme"] | undefined) {
 
 /** Android: a link shared from another app (Share → Stash) is analyzed in the Download tab. */
 function useShares() {
-  useEffect(() => {
-    if (!isAndroid) return;
+  useSubscription(async () => {
+    if (!isAndroid) return () => {};
     const take = async () => {
       const text = await invoke<string | null>("take_shared").catch(() => null);
       const url = text?.match(/https?:\/\/\S+/)?.[0];
@@ -44,21 +45,48 @@ function useShares() {
     };
     // The share that opened the app, then those that come while it runs.
     void take();
-    const unlisten = listen("shared", () => void take());
-    return () => void unlisten.then((stop) => stop());
-  }, []);
+    return listen("shared", () => void take());
+  });
+}
+
+/** Files that come this close together were opened together (Explorer starts one Stash per
+ * file chosen). */
+const OPENED_TOGETHER_MS = 300;
+
+/** Windows: files opened with Explorer's "Edit with Stash" replace those of the Edit tab:
+ * those that opened the app, then those that come while it runs, one batch after another. */
+function useOpenedFiles() {
+  useSubscription(async () => {
+    if (isAndroid) return () => {};
+    let opening = Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const take = () => {
+      opening = opening.then(async () => {
+        const paths = await invoke<string[]>("take_opened").catch(() => []);
+        if (paths?.length) await openFiles(paths);
+      });
+    };
+    take();
+    const unlisten = await listen("opened", () => {
+      clearTimeout(timer);
+      timer = setTimeout(take, OPENED_TOGETHER_MS);
+    });
+    return () => {
+      clearTimeout(timer);
+      unlisten();
+    };
+  });
 }
 
 /** Windows: minimize, maximize and close, in place of the system title bar. */
 function WindowControls() {
   const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
+  useSubscription(() => {
     const check = () => void getCurrentWindow().isMaximized().then((m) => setMaximized(Boolean(m)), () => {});
     check();
-    const unlisten = getCurrentWindow().onResized(check);
-    return () => void unlisten.then((stop) => stop());
-  }, []);
+    return getCurrentWindow().onResized(check);
+  });
   const button = "flex h-full w-[46px] items-center justify-center text-foreground/80 transition-colors hover:bg-foreground/10";
   return (
     <div className="flex h-full self-stretch">
@@ -96,6 +124,7 @@ export default function App() {
   useJobEvents();
   useFileDrop();
   useShares();
+  useOpenedFiles();
   const tab = useEdit((s) => s.tab);
   const active = useJobs((s) => s.jobs.filter(isActive).length);
 

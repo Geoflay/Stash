@@ -2,9 +2,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::media::{AudioCodec, Preset};
+use crate::media::{AV1_PRESETS, AudioCodec, Encoder, H264Preset, VideoCodec};
+use crate::priority::Priority;
 
 const FILE: &str = "settings.json";
 
@@ -16,10 +17,22 @@ pub struct Settings {
     pub theme: Theme,
     /// Update yt-dlp when the app starts.
     pub auto_update: bool,
-    /// The sound codec a re-encode writes (the picture is always H.264).
+    /// The sound codec a re-encode writes.
     pub audio_codec: AudioCodec,
-    /// How hard a re-encode works.
-    pub preset: Preset,
+    /// The picture codec a re-encode writes: H.264 or AV1.
+    #[serde(deserialize_with = "encodable")]
+    pub video_codec: VideoCodec,
+    /// How hard x264 works (once saved as "preset", when it was the only encoder).
+    #[serde(alias = "preset")]
+    pub h264_preset: H264Preset,
+    /// How hard SVT-AV1 works, from 0 (slowest) to 13.
+    pub av1_preset: u8,
+    /// The priority encodes run at.
+    pub encoding_priority: Priority,
+    /// Encode with the graphics card when it can (Windows only).
+    pub gpu: bool,
+    /// How hard the graphics card works, from 1 (fastest) to 7.
+    pub gpu_preset: u8,
     /// Jobs of the queue that run at once.
     pub max_jobs: u32,
     /// Cut the parts SponsorBlock lists out of YouTube downloads.
@@ -40,13 +53,35 @@ impl Default for Settings {
             theme: Theme::System,
             auto_update: true,
             audio_codec: AudioCodec::Aac,
-            preset: Preset::Faster,
+            video_codec: VideoCodec::H264,
+            h264_preset: H264Preset::Faster,
+            av1_preset: 8,
+            encoding_priority: Priority::BelowNormal,
+            gpu: false,
+            // As good as 7 on game recordings, in half the time.
+            gpu_preset: 4,
             max_jobs: 3,
             sponsor_block: true,
             sponsor_categories: SPONSOR_CATEGORIES.map(String::from).to_vec(),
             presets: Vec::new(),
         }
     }
+}
+
+impl Settings {
+    /// The picture encoder of a re-encode, at its preset.
+    pub fn encoder(&self) -> Encoder {
+        match self.video_codec {
+            VideoCodec::Av1 => Encoder::Av1(self.av1_preset.min(*AV1_PRESETS.end())),
+            _ => Encoder::H264(self.h264_preset),
+        }
+    }
+}
+
+/// H.264 unless AV1: the app writes no other picture codec (an older setting said "h265").
+fn encodable<'de, D: Deserializer<'de>>(deserializer: D) -> Result<VideoCodec, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(if value == "av1" { VideoCodec::Av1 } else { VideoCodec::H264 })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -85,7 +120,12 @@ mod tests {
             theme: Theme::Dark,
             auto_update: false,
             audio_codec: AudioCodec::Mp3,
-            preset: Preset::Slow,
+            video_codec: VideoCodec::Av1,
+            h264_preset: H264Preset::Slow,
+            av1_preset: 4,
+            encoding_priority: Priority::Idle,
+            gpu: true,
+            gpu_preset: 7,
             max_jobs: 1,
             sponsor_block: false,
             sponsor_categories: vec!["sponsor".into()],
@@ -93,13 +133,16 @@ mod tests {
         };
         save(&dir, &settings).unwrap();
         assert_eq!(load(&dir), settings);
+        assert_eq!(settings.encoder(), Encoder::Av1(4));
+        assert_eq!(Settings { av1_preset: 20, ..settings.clone() }.encoder(), Encoder::Av1(13));
+        assert_eq!(Settings { video_codec: VideoCodec::H264, ..settings }.encoder(), Encoder::H264(H264Preset::Slow));
 
         // Unknown or missing fields keep the defaults.
         fs::write(dir.join(FILE), r#"{"theme":"light","old":1}"#).unwrap();
         assert_eq!(load(&dir), Settings { theme: Theme::Light, ..Settings::default() });
-        // The picture codec, chosen before only H.264 was written, is left out.
-        fs::write(dir.join(FILE), r#"{"videoCodec":"h265","audioCodec":"mp3"}"#).unwrap();
-        assert_eq!(load(&dir), Settings { audio_codec: AudioCodec::Mp3, ..Settings::default() });
+        // H.265, which the app no longer writes, is H.264; x264's preset, once "preset", is read.
+        fs::write(dir.join(FILE), r#"{"videoCodec":"h265","audioCodec":"mp3","preset":"medium"}"#).unwrap();
+        assert_eq!(load(&dir), Settings { audio_codec: AudioCodec::Mp3, h264_preset: H264Preset::Medium, ..Settings::default() });
         fs::remove_dir_all(dir).unwrap();
     }
 }

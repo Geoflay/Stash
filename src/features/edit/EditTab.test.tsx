@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
@@ -12,7 +12,12 @@ const settings: Settings = {
   theme: "system",
   autoUpdate: true,
   audioCodec: "aac",
-  preset: "faster",
+  videoCodec: "h264",
+  h264Preset: "faster",
+  av1Preset: 8,
+  encodingPriority: "belowNormal",
+  gpu: false,
+  gpuPreset: 4,
   maxJobs: 3,
   sponsorBlock: true,
   sponsorCategories: ["sponsor", "intro"],
@@ -43,6 +48,8 @@ let opened: unknown[] = [];
 let previewed: unknown[] = [];
 /** Finishes the preview copy being made. */
 let previewDone: () => void = () => {};
+/** The copy the core makes; `null` for a video played in parts. */
+let previewCopy: string | null = null;
 let started: unknown;
 /** Every job started, in order. */
 let starts: unknown[] = [];
@@ -56,6 +63,7 @@ beforeEach(() => {
   savedPresets = null;
   opened = [];
   previewed = [];
+  previewCopy = "C:/cache/preview-1.mp4";
   started = undefined;
   useDownloads.setState({ media: null, error: null });
   useSettings.setState({ settings: null, error: null });
@@ -83,7 +91,7 @@ beforeEach(() => {
         // The core sends its progress on the channel, then the copy's path.
         const internals = (window as unknown as { __TAURI_INTERNALS__: { runCallback(id: number, data: unknown): void } }).__TAURI_INTERNALS__;
         internals.runCallback(onProgress.id, { index: 0, message: 0.42 });
-        return new Promise((resolve) => (previewDone = () => resolve("C:/cache/preview-1.mp4")));
+        return new Promise((resolve) => (previewDone = () => resolve(previewCopy)));
       }
       if (cmd === "start_edit") {
         started = args;
@@ -225,6 +233,33 @@ test("plays a copy of a file the preview can't play", async () => {
   fireEvent.error(document.querySelector("video")!);
   expect(screen.getByText("This file can't be previewed.")).toBeDefined();
   expect(previewed).toHaveLength(1);
+});
+
+test("plays a video the preview can't play in parts made as it plays", async () => {
+  file = { ...clip, path: "C:/Users/me/Videos/clip.mkv", name: "clip.mkv", videoCodec: "h265" };
+  previewCopy = null;
+  // The webview's Media Source, which the parts are given to.
+  class FakeSource extends EventTarget {
+    static isTypeSupported = () => true;
+    readyState = "closed";
+  }
+  vi.stubGlobal("MediaSource", FakeSource);
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:parts");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  try {
+    await openFromPicker();
+    fireEvent.click(screen.getByRole("button", { name: "Play preview" }));
+    fireEvent.error(document.querySelector("video")!);
+    act(() => previewDone());
+    await waitFor(() => expect(document.querySelector("video")?.getAttribute("src")).toBe("blob:parts"));
+    // The parts fail too: no preview, and no copy asked for again.
+    fireEvent.error(document.querySelector("video")!);
+    expect(screen.getByText("This file can't be previewed.")).toBeDefined();
+    expect(previewed).toEqual([file.path]);
+  } finally {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  }
 });
 
 test("the preview seeks to the last edge moved once the running seek is done", async () => {

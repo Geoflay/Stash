@@ -13,7 +13,12 @@ const settings: Settings = {
   theme: "system",
   autoUpdate: true,
   audioCodec: "aac",
-  preset: "faster",
+  videoCodec: "h264",
+  h264Preset: "faster",
+  av1Preset: 8,
+  encodingPriority: "belowNormal",
+  gpu: false,
+  gpuPreset: 4,
   maxJobs: 3,
   sponsorBlock: true,
   sponsorCategories: ["sponsor", "intro"],
@@ -353,6 +358,28 @@ test("shows a readable error", async () => {
   expect((await screen.findByRole("alert")).textContent).toBe("This video is private.");
 });
 
+test("a link analyzed while another one is keeps its own result", async () => {
+  // The first link answers last, with an error: the second one's result stays.
+  let fail = () => {};
+  mockIPC((cmd, args) => {
+    if (cmd === "get_settings") return settings;
+    if (cmd !== "analyze") return;
+    if ((args as { url: string }).url === photoPost.url) return photoPost;
+    return new Promise((_, reject) => (fail = () => reject({ key: "errors.private", params: {} })));
+  }, { shouldMockEvents: true });
+  render(<App />);
+  const link = screen.getByRole("textbox", { name: "Video link" });
+  fireEvent.change(link, { target: { value: media.url } });
+  fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+  await waitFor(() => expect(useDownloads.getState().analyzing).toBe(true));
+  fireEvent.change(link, { target: { value: photoPost.url } });
+  fireEvent.submit(link.closest("form")!);
+  await titled("Hehe");
+  await act(async () => fail());
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(useDownloads.getState()).toMatchObject({ analyzing: false, media: photoPost, error: null });
+});
+
 test.each([390, 1280])("sends the edit options at %ipx", async (width) => {
   window.innerWidth = width;
   render(<App />);
@@ -392,9 +419,10 @@ test.each([390, 1280])("sends the edit options at %ipx", async (width) => {
 
   await act(() => emit("job", { id: 7, step: "encode", fraction: 0.25, eta: null, path: null, error: null }));
   expect(screen.getByText("Re-encoding · 25%")).toBeDefined();
-  // Too small a limit is not an error: the file is saved, with a note.
-  await act(() => emit("job", { id: 7, step: "done", fraction: null, eta: null, path: "C:/Downloads/zoo.mp4", error: { key: "jobs.overSize", params: { sizeMb: 12.5 } } }));
-  expect(screen.getByText("Over the size limit: 12.5 MB is as small as this gets.")).toBeDefined();
+  // Too small a limit is not an error: the file is saved, with a note, and how long the encode took.
+  const overSize = { key: "jobs.overSize", params: { sizeMb: 12.5 } };
+  await act(() => emit("job", { id: 7, step: "done", fraction: null, eta: null, path: "C:/Downloads/zoo.mp4", error: overSize, encoded: 72.4 }));
+  expect(screen.getByText("Over the size limit: 12.5 MB is as small as this gets. · encoded in 1:12")).toBeDefined();
   expect(screen.getByRole("button", { name: "Open" })).toBeDefined();
 });
 

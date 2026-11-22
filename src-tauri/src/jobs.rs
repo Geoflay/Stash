@@ -15,7 +15,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::extractor::{self, Part};
 use crate::media::{self, Container, Ffmpeg, Kind, Probe, Slides};
+use crate::priority;
 use crate::progress::{self, Live};
+use crate::settings::Settings;
 use crate::tiktok::{self, Photo};
 use crate::{Failure, edit};
 
@@ -106,17 +108,21 @@ struct Event {
     path: Option<String>,
     /// Why a job failed; on a finished one, a note (the size limit was missed).
     error: Option<Failure>,
+    /// On a finished job, the seconds spent encoding, when it was encoded.
+    encoded: Option<f64>,
 }
 
 /// A saved file, with a note when it came out over the size limit.
 struct Saved {
     path: String,
     note: Option<Failure>,
+    /// Seconds spent encoding (the slideshow and the re-encode), when there was any.
+    encoded: Option<f64>,
 }
 
 impl Event {
     fn new(id: u32, step: Step, fraction: Option<f64>) -> Self {
-        Event { id, step, fraction, eta: None, path: None, error: None }
+        Event { id, step, fraction, eta: None, path: None, error: None, encoded: None }
     }
 }
 
@@ -158,7 +164,7 @@ impl Jobs {
                 &app,
                 match result {
                     _ if jobs.cancelled.lock().unwrap().contains(&id) => Event { step: Step::Cancelled, ..event },
-                    Ok(saved) => Event { path: Some(saved.path), error: saved.note, ..event },
+                    Ok(saved) => Event { path: Some(saved.path), error: saved.note, encoded: saved.encoded, ..event },
                     Err(error) => Event { step: Step::Failed, error: Some(error), ..event },
                 },
             );
@@ -240,15 +246,15 @@ fn edit_file(app: &AppHandle, id: u32, request: &EditRequest) -> Result<Saved, F
     in_job_dir(app, id, |dir| {
         let source = if options.needs_encode(&probe) {
             // Read in place; `finish` re-encodes it into a new file.
-            Source { file: request.path.clone(), probe, convert: false }
+            Source::new(request.path.clone(), probe)
         } else {
             emit(app, id, Step::Mux, Some(1.0));
             let container = options.output(&probe).container;
             let file = dir.join(format!("muxed.{}", container.ext()));
-            match media::remux(&file, container, &kept_tracks(&request.path, options, &probe), &[]).and_then(|_| media::probe(&file)) {
-                Ok(probe) => Source { file, probe, convert: false },
+            match remux_kept(&request.path, &file, container, options, &probe, &[]) {
+                Ok(probe) => Source::new(file, probe),
                 // Tracks the file cannot hold as they are: re-encoded instead.
-                Err(_) => Source { file: request.path.clone(), probe, convert: true },
+                Err(_) => Source { convert: true, ..Source::new(request.path.clone(), probe) },
             }
         };
         finish(app, id, &request.title, options, dir, source)
@@ -257,7 +263,7 @@ fn edit_file(app: &AppHandle, id: u32, request: &EditRequest) -> Result<Saved, F
 
 fn run_job(app: &AppHandle, id: u32, request: &Request, dir: &Path) -> Result<Saved, Failure> {
     if let Some(photos) = request.photos.as_ref().filter(|p| p.files) {
-        return save_photos(app, id, request, &photos.list, dir).map(|path| Saved { path, note: None });
+        return save_photos(app, id, request, &photos.list, dir).map(|path| Saved { path, note: None, encoded: None });
     }
     let inputs = if request.parts().is_empty() { Vec::new() } else { fetch(app, id, request, dir)? };
     let source = match request.slides() {
@@ -327,7 +333,7 @@ fn save_photos(app: &AppHandle, id: u32, request: &Request, photos: &[Photo], di
     }
     #[cfg(not(target_os = "android"))]
     {
-        let folder = reserve_dir(&download_dir(app, dir)?, &name).map_err(Failure::io)?;
+        let folder = reserve_dir(&download_dir(app, &crate::saved_settings(app)?, dir)?, &name).map_err(Failure::io)?;
         match download_photos(app, id, photos, &folder) {
             Ok(_) => Ok(folder.display().to_string()),
             Err(err) => {
@@ -344,12 +350,21 @@ struct Source {
     probe: Probe,
     /// Its tracks could not be remuxed: it must be re-encoded.
     convert: bool,
+    /// Seconds spent encoding it (a slideshow).
+    encoded: f64,
 }
 
-/// The tracks of `file` the options keep.
-fn kept_tracks(file: &Path, options: &edit::Options, probe: &Probe) -> Vec<(PathBuf, Kind)> {
+impl Source {
+    fn new(file: PathBuf, probe: Probe) -> Self {
+        Source { file, probe, convert: false, encoded: 0.0 }
+    }
+}
+
+/// Remuxes the tracks of `file` the options keep into `out`, without the `cuts`, and probes it.
+fn remux_kept(file: &Path, out: &Path, container: Container, options: &edit::Options, probe: &Probe, cuts: &[(f64, f64)]) -> anyhow::Result<Probe> {
     let (video, audio) = options.keeps(probe);
-    media::tracks(file, video, audio)
+    media::remux(out, container, &media::tracks(file, video, audio), cuts)?;
+    media::probe(out)
 }
 
 /// Makes the video from the photos and the downloaded sound, if any.
@@ -357,14 +372,17 @@ fn slideshow(app: &AppHandle, id: u32, photos: &[Photo], seconds: f64, dir: &Pat
     let files = download_photos(app, id, photos, dir)?;
     is_cancelled(app, id)?;
     let (width, height) = edit::slide_size(&photos[0]);
-    let preset = crate::settings::load(&crate::data_dir(app)?).preset;
-    let slides = Slides { width, height, seconds, video_kbps: edit::SLIDE_KBPS, audio_kbps: edit::AUDIO_KBPS, preset };
+    let settings = crate::saved_settings(app)?;
+    let slides = Slides { width, height, seconds, video_kbps: edit::SLIDE_KBPS, audio_kbps: edit::AUDIO_KBPS, preset: settings.h264_preset };
     let file = dir.join("slides.mp4");
     let sound = inputs.first().map(|(file, _)| file.as_path());
     let stop = || is_cancelled(app, id).is_err();
+    let _priority = priority::enter(settings.encoding_priority);
+    let started = Instant::now();
     Ffmpeg { stop: &stop }.slideshow(&files, sound, &file, &slides, &mut encode_progress(app, id))?;
+    let encoded = started.elapsed().as_secs_f64();
     let probe = media::probe(&file).map_err(Failure::io)?;
-    Ok(Source { file, probe, convert: false })
+    Ok(Source { encoded, ..Source::new(file, probe) })
 }
 
 /// Muxes the downloaded streams into one MP4 (or M4A); a lone sound that is not MP4
@@ -376,20 +394,20 @@ fn assemble(app: &AppHandle, id: u32, dir: &Path, inputs: &[(PathBuf, Kind)]) ->
         && !mp4(file)
     {
         let probe = media::probe(file).map_err(Failure::io)?;
-        return Ok(Source { file: file.clone(), probe, convert: false });
+        return Ok(Source::new(file.clone(), probe));
     }
     let video = inputs.iter().any(|(_, k)| *k == Kind::Video);
     let (file, container) = if video { (dir.join("muxed.mp4"), Container::Mp4) } else { (dir.join("muxed.m4a"), Container::M4a) };
     media::remux(&file, container, inputs, &[]).map_err(Failure::io)?;
     let probe = media::probe(&file).map_err(Failure::io)?;
-    Ok(Source { file, probe, convert: false })
+    Ok(Source::new(file, probe))
 }
 
 /// The download folder on Windows; Android saves from the job folder into Download/Stash.
-fn download_dir(app: &AppHandle, dir: &Path) -> Result<PathBuf, Failure> {
-    Ok(match crate::settings::load(&crate::data_dir(app)?).download_dir {
+fn download_dir(app: &AppHandle, settings: &Settings, dir: &Path) -> Result<PathBuf, Failure> {
+    Ok(match &settings.download_dir {
         _ if !cfg!(windows) => dir.to_path_buf(),
-        Some(folder) => folder,
+        Some(folder) => folder.clone(),
         None => app.path().download_dir().map_err(Failure::io)?,
     })
 }
@@ -410,6 +428,9 @@ fn fetch(app: &AppHandle, id: u32, request: &Request, dir: &Path) -> Result<Vec<
         // yt-dlp hands plain HLS to ffmpeg otherwise.
         "--downloader",
         "m3u8:native",
+        // Streams cut into fragments (HLS, DASH: X, TikTok, Twitch…) a few at a time, not one.
+        "--concurrent-fragments",
+        "4",
         "--no-part",
         "--newline",
         "--progress-template",
@@ -458,7 +479,12 @@ fn fetch(app: &AppHandle, id: u32, request: &Request, dir: &Path) -> Result<Vec<
         if part.video {
             inputs.push((file.clone(), Kind::Video));
         }
-        if part.audio {
+        // A file whose codecs the site left out may have no sound (Imgur's GIFs as MP4).
+        let silent = part.audio && !media::probe(file).map_err(Failure::io)?.audio;
+        if silent && !part.video {
+            return Err(Failure::plain("errors.noSound"));
+        }
+        if part.audio && !silent {
             inputs.push((file.clone(), Kind::Audio));
         }
     }
@@ -468,15 +494,20 @@ fn fetch(app: &AppHandle, id: u32, request: &Request, dir: &Path) -> Result<Vec<
 /// Re-encodes only when an option requires it, and saves the result:
 /// in the download folder on Windows, in Download/Stash on Android.
 fn finish(app: &AppHandle, id: u32, title: &str, options: &edit::Options, dir: &Path, source: Source) -> Result<Saved, Failure> {
-    let Source { mut file, mut probe, mut convert } = source;
+    let Source { mut file, mut probe, mut convert, mut encoded } = source;
+    // A re-encode writes the picture codec of the settings, at its preset, or with the
+    // graphics card when asked and it has an encoder for that codec.
+    let settings = crate::saved_settings(app)?;
+    let encoder = settings.encoder();
+    let encoder = settings.gpu.then(|| media::gpu_encoder(encoder.codec(), settings.gpu_preset)).flatten().unwrap_or(encoder);
+    let mut options = edit::Options { encoder, card: settings.gpu, ..options.clone() };
     let container = options.output(&probe).container;
     // SponsorBlock's cuts alone: copied out at the nearest keyframes rather than re-encoded.
-    let mut options = options.clone();
     let cuts = options.cuts(options.range(probe.duration));
     if !cuts.is_empty() && !convert && !options.needs_encode(&probe) {
         emit(app, id, Step::Mux, Some(1.0));
         let cut = dir.join(format!("cut.{}", container.ext()));
-        match media::remux(&cut, container, &kept_tracks(&file, &options, &probe), &cuts).and_then(|_| media::probe(&cut)) {
+        match remux_kept(&file, &cut, container, &options, &probe, &cuts) {
             Ok(cut_probe) => {
                 (file, probe) = (cut, cut_probe);
                 options.cuts.clear();
@@ -489,21 +520,24 @@ fn finish(app: &AppHandle, id: u32, title: &str, options: &edit::Options, dir: &
     let name = format!("{}.{}", safe_name(title), container.ext());
     let too_big = options.target_bytes(&probe).is_some_and(|max| fs::metadata(&file).map_or(true, |m| m.len() > max));
 
-    let target = download_dir(app, dir)?;
+    let target = download_dir(app, &settings, dir)?;
     is_cancelled(app, id)?;
     let path = reserve(&target, &name).map_err(Failure::io)?;
     // Only a file made in the job folder is ever moved: an edited original always re-encodes here.
     let result = if convert || options.needs_encode(&probe) || too_big {
-        // A re-encode writes the codecs of the settings, even for an edit, at their preset.
-        let preset = crate::settings::load(&crate::data_dir(app)?).preset;
-        let options = &edit::Options { keep_codecs: false, preset, ..options.clone() };
+        // A re-encode writes the codecs of the settings, even for an edit.
+        let options = &edit::Options { keep_codecs: false, ..options.clone() };
         let stop = || is_cancelled(app, id).is_err();
-        edit::encode(&Ffmpeg { stop: &stop }, &file, &path, options, &probe, dir, &mut encode_progress(app, id))
+        let _priority = priority::enter(settings.encoding_priority);
+        let started = Instant::now();
+        let result = edit::encode(&Ffmpeg { stop: &stop }, &file, &path, options, &probe, dir, &mut encode_progress(app, id));
+        encoded += started.elapsed().as_secs_f64();
+        result
     } else if file.extension().is_some_and(|ext| ext == container.ext()) {
         crate::move_file(&file, &path).map(|_| None).map_err(Failure::io)
     } else {
         // The same tracks in another kind of file.
-        media::remux(&path, container, &kept_tracks(&file, options, &probe), &[]).map(|_| None).map_err(Failure::io)
+        remux_kept(&file, &path, container, options, &probe, &[]).map(|_| None).map_err(Failure::io)
     };
     let note = result.inspect_err(|_| {
         let _ = fs::remove_file(&path);
@@ -516,7 +550,7 @@ fn finish(app: &AppHandle, id: u32, title: &str, options: &edit::Options, dir: &
     };
     #[cfg(not(target_os = "android"))]
     let path = path.display().to_string();
-    Ok(Saved { path, note })
+    Ok(Saved { path, note, encoded: (encoded > 0.0).then_some(encoded) })
 }
 
 /// Overall progress over all parts, from yt-dlp's progress lines.
@@ -567,6 +601,11 @@ fn safe_name(title: &str) -> String {
     if name.is_empty() { "video".into() } else { name.into() }
 }
 
+/// `name`, then `name (1)`, `name (2)`… for the next tries.
+fn numbered(name: &str, n: u32) -> String {
+    if n == 0 { name.to_owned() } else { format!("{name} ({n})") }
+}
+
 /// Creates the first free `dir/name_for(n)` (n = 0, 1, 2…) with `make` and returns it.
 /// Never overwrites.
 fn first_free(dir: &Path, name_for: impl Fn(u32) -> String, make: impl Fn(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
@@ -585,14 +624,14 @@ fn first_free(dir: &Path, name_for: impl Fn(u32) -> String, make: impl Fn(&Path)
 /// Creates `dir/name`, or `dir/stem (n).ext` when taken, and returns its path.
 fn reserve(dir: &Path, name: &str) -> io::Result<PathBuf> {
     let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
-    let name_for = |n| if n == 0 { name.to_owned() } else { format!("{stem} ({n}).{ext}") };
+    let name_for = |n| if n == 0 { name.to_owned() } else { format!("{}.{ext}", numbered(stem, n)) };
     first_free(dir, name_for, |path| OpenOptions::new().write(true).create_new(true).open(path).map(|_| ()))
 }
 
 /// Creates `dir/name`, or `dir/name (n)` when taken, as a folder.
 #[cfg(not(target_os = "android"))]
 fn reserve_dir(dir: &Path, name: &str) -> io::Result<PathBuf> {
-    first_free(dir, |n| if n == 0 { name.to_owned() } else { format!("{name} ({n})") }, |path| fs::create_dir(path))
+    first_free(dir, |n| numbered(name, n), |path| fs::create_dir(path))
 }
 
 /// Renames a saved file (a path on Windows, a content URI on Android) after `title`,
@@ -617,7 +656,7 @@ fn rename(path: &Path, title: &str) -> io::Result<PathBuf> {
     let stem = safe_name(title);
     let ext = if path.is_dir() { None } else { path.extension().map(|e| e.to_string_lossy().into_owned()) };
     let name_for = |n| {
-        let name = if n == 0 { stem.clone() } else { format!("{stem} ({n})") };
+        let name = numbered(&stem, n);
         ext.as_ref().map_or(name.clone(), |ext| format!("{name}.{ext}"))
     };
     // Windows names ignore case: the file itself, in other case, is not another one.

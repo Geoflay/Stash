@@ -8,13 +8,19 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::Failure;
-use crate::media::{AudioCodec, Container, Preset, Probe, Settings, Transcoder, VideoCodec};
+use crate::media::{AudioCodec, Container, Encoder, Probe, Settings, Transcoder, VideoCodec};
 use crate::tiktok::Photo;
 
 /// The share of a size limit aimed at: container overhead and encoder drift take the rest.
 const MARGIN: f64 = 0.99;
 /// A result under this share of its limit gets one larger try.
 const FULL: f64 = 0.97;
+/// Graphics card encoders go about 10 % over their bitrate: aimed under it, the first
+/// try fits rather than being made again.
+const GPU_AIM: f64 = 0.9;
+/// A graphics card is chosen for speed: its result is kept from this share of the limit
+/// (an encoder that meets its bitrate exactly fills 89 %), rather than made again larger.
+const GPU_FULL: f64 = 0.88;
 /// With a size limit, the picture never gets more than this times the source's bitrate.
 const MAX_GROWTH: f64 = 2.0;
 /// The lowest video bitrate for a size limit: a limit that needs less is missed, not refused.
@@ -23,10 +29,21 @@ const MIN_VIDEO_KBPS: f64 = 30.0;
 pub const AUDIO_KBPS: u32 = 128;
 /// The lowest sound bitrate.
 const MIN_AUDIO_KBPS: f64 = 32.0;
-/// Short side worth keeping for a video bitrate: fewer pixels look better than blocky ones
-/// (the old Stash's steps, never under 240p).
-const SIDE_FOR_KBPS: [(f64, u32); 4] = [(2500.0, 1080), (1200.0, 720), (700.0, 480), (350.0, 360)];
+/// Short sides tried under the source's, for a size limit: fewer pixels look better than
+/// blocky ones. Never under 240p.
+const SIDES: [u32; 4] = [1080, 720, 480, 360];
 const MIN_SIDE: u32 = 240;
+/// Seconds of the result encoded to measure how hard a video is to compress, at this side.
+const SAMPLE_SECONDS: f64 = 4.0;
+const SAMPLE_SIDE: u32 = 720;
+/// The lowest bitrate a graphics card's encoder makes at 720p, in kbps (AV1, H.264): asked
+/// less, it makes about that, the file too big. At most 114 and 98 on three films (an
+/// animation, a grainy film, a CGI series); a 4K game trailer took 160 in AV1.
+const CARD_FLOOR: (f64, f64) = (115.0, 100.0);
+/// How that floor grows with the side, from 240p to 1080p.
+const FLOOR_POWER: f64 = 1.6;
+/// The room a bitrate leaves over the floor, so the encoder is not at its roughest.
+const FLOOR_ROOM: f64 = 1.25;
 /// Encodes after the first one when the result is still too big.
 const MAX_RETRIES: usize = 2;
 
@@ -50,13 +67,17 @@ pub struct Options {
     pub audio_codec: AudioCodec,
     /// A lower frame rate.
     pub fps: Option<f64>,
-    /// An edit: a copy that needs no re-encode keeps the file's own codecs.
+    /// An edit: a copy whose picture is in the settings' codec, and that needs no re-encode,
+    /// keeps the file's own codecs; any other picture codec is re-encoded into it.
     pub keep_codecs: bool,
     /// Parts removed (SponsorBlock), in source seconds, in order and apart.
     pub cuts: Vec<(f64, f64)>,
-    /// The encoders' preset: from the settings, not the request.
+    /// The picture encoder of a re-encode, at its preset: from the settings, not the request.
     #[serde(skip)]
-    pub preset: Preset,
+    pub encoder: Encoder,
+    /// The graphics card may decode and resize for any encoder: from the settings.
+    #[serde(skip)]
+    pub card: bool,
 }
 
 impl Default for Options {
@@ -73,7 +94,8 @@ impl Default for Options {
             fps: None,
             keep_codecs: false,
             cuts: Vec::new(),
-            preset: Preset::default(),
+            encoder: Encoder::default(),
+            card: false,
         }
     }
 }
@@ -94,7 +116,8 @@ impl Options {
     }
 
     /// The file saved for `probe`: the chosen one, or with `keep_codecs` the source's codecs
-    /// when nothing else needs a re-encode and the file can hold them.
+    /// when its picture is in the chosen codec, nothing else needs a re-encode and the file
+    /// can hold them.
     pub fn output(&self, probe: &Probe) -> Output {
         let chosen = self.chosen(probe);
         if self.keep_codecs && !self.reshapes(probe) {
@@ -103,22 +126,27 @@ impl Options {
         chosen
     }
 
-    /// The source's codecs in the `out` file, if it is a video file that holds them.
+    /// The source's codecs in the `out` file, if it is a video file that holds them and its
+    /// picture is in `out`'s codec.
     fn source_codecs(&self, out: Output, probe: &Probe) -> Option<Output> {
         if out.container.sound().is_some() {
             return None;
         }
         let (video, audio) = self.keeps(probe);
-        let held = |codecs: &[VideoCodec], codec: Option<VideoCodec>| codec.filter(|c| codecs.contains(c));
-        let video = if video { held(out.container.video_codecs(), probe.video?.codec)? } else { out.video };
+        if video && probe.video?.codec != Some(out.video) {
+            return None;
+        }
         let audio = if audio { probe.audio_codec.filter(|c| out.container.audio_codecs().contains(c))? } else { out.audio };
-        Some(Output { video, audio, ..out })
+        Some(Output { audio, ..out })
     }
 
-    /// The file chosen for `probe`, its picture in H.264: a source without a picture gives a
-    /// sound-only file, and a sound codec the file cannot hold falls back to its usual one.
+    /// The file chosen for `probe`, its picture in the encoder's codec (H.264 when the file
+    /// can't hold it): a source without a picture gives a sound-only file, and a sound codec
+    /// the file cannot hold falls back to its usual one.
     fn chosen(&self, probe: &Probe) -> Output {
-        let (video, audio) = (VideoCodec::H264, self.audio_codec);
+        let codec = self.encoder.codec();
+        let video = if self.format.video_codecs().contains(&codec) { codec } else { VideoCodec::H264 };
+        let audio = self.audio_codec;
         match self.format.sound() {
             Some(sound) => Output { container: self.format, video, audio: sound },
             None if probe.video.is_none() => Output { container: Container::for_sound(audio), video, audio },
@@ -160,7 +188,9 @@ impl Options {
     pub fn needs_encode(&self, probe: &Probe) -> bool {
         let (video, audio) = self.keeps(probe);
         let out = self.output(probe);
-        let picture = video && probe.video.is_some_and(|v| v.codec != Some(out.video));
+        // A download in H.264 is kept: re-encoding it only for another codec loses time and
+        // detail. An edit writes the codec asked for.
+        let picture = video && probe.video.is_some_and(|v| v.codec != Some(out.video) && (self.keep_codecs || v.codec != Some(VideoCodec::H264)));
         let sound = audio && probe.audio_codec != Some(out.audio);
         self.reshapes(probe) || picture || sound
     }
@@ -239,9 +269,56 @@ fn split(total: f64, video: bool, audio: bool) -> Bitrates {
     Bitrates { video_kbps: video_kbps as u32, audio_kbps }
 }
 
-/// The short side for an H.264 bitrate.
-fn side_for(video_kbps: u32) -> u32 {
-    SIDE_FOR_KBPS.iter().find(|(kbps, _)| video_kbps as f64 >= *kbps).map_or(MIN_SIDE, |&(_, side)| side)
+/// The largest short side, from the source's down, a bitrate carries for a video of
+/// `difficulty` (see [`difficulty`]). Measured on game recordings: x264 is best at a smaller
+/// size early, since its blocks look worse than fewer pixels; SVT-AV1 blurs rather than
+/// blocks, so it keeps the size until its smallest file no longer fits.
+fn side_for(video_kbps: u32, difficulty: f64, codec: VideoCodec, source_side: u32) -> u32 {
+    // The share of the difficulty a 720p picture needs, and how it grows with the side.
+    let (share, power) = if codec == VideoCodec::Av1 { (0.14, 1.45) } else { (0.8, 2.3) };
+    let needs = |side: u32| difficulty * share * (side as f64 / SAMPLE_SIDE as f64).powf(power);
+    std::iter::once(source_side)
+        .chain(SIDES.into_iter().filter(|&side| side < source_side))
+        .find(|&side| video_kbps as f64 >= needs(side))
+        .unwrap_or(MIN_SIDE)
+}
+
+/// The largest side from `side` down whose floor (a graphics card encoder's lowest bitrate,
+/// `floor` at 720p) `video_kbps` clears with room to spare; the smallest side otherwise.
+fn over_floor(side: u32, video_kbps: u32, floor: f64) -> u32 {
+    std::iter::once(side)
+        .chain(SIDES.into_iter().filter(|&s| s < side))
+        .find(|&s| video_kbps as f64 >= floor * FLOOR_ROOM * (s as f64 / SAMPLE_SIDE as f64).powf(FLOOR_POWER))
+        .unwrap_or(MIN_SIDE)
+}
+
+/// How hard a video is to compress: the bitrate a quick H.264 encode of a few seconds from
+/// the middle of `base` takes at 720p (made at the source's side when smaller, and counted
+/// as 720p). A detailed game can take ten times what a calm one does.
+fn difficulty(transcoder: &impl Transcoder, input: &Path, base: &Settings, (start, end): (f64, f64), source_side: u32, work: &Path) -> Result<f64, Failure> {
+    let half = SAMPLE_SECONDS * base.speed / 2.0;
+    let middle = (start + end) / 2.0;
+    let (from, to) = ((middle - half).max(start), (middle + half).min(end));
+    let side = source_side.min(SAMPLE_SIDE);
+    let sample = Settings {
+        start: from,
+        end: Some(to),
+        cuts: Vec::new(),
+        audio: false,
+        height: (side < source_side).then_some(side),
+        video_kbps: 100_000,
+        audio_kbps: 0,
+        exact: false,
+        draft: true,
+        ..base.clone()
+    };
+    let file = work.join(format!("sample.{}", base.container.ext()));
+    transcoder.transcode(input, &file, &sample, &mut |_| {})?;
+    let bytes = fs::metadata(&file).map_err(Failure::io)?.len();
+    let _ = fs::remove_file(&file);
+    let kbps = bytes as f64 * 8.0 / ((to - from) / base.speed).max(0.1) / 1000.0;
+    // A smaller picture takes about its pixels to the power 0.75.
+    Ok(kbps * (SAMPLE_SIDE as f64 / side as f64).powf(1.5))
 }
 
 /// Bitrate of a video made from photos: still pictures need little.
@@ -288,35 +365,54 @@ pub fn encode(
         video_kbps: source.filter(|v| v.kbps > 0.0).map_or(u32::MAX, |v| (v.kbps * MAX_GROWTH).max(300.0) as u32),
         audio_kbps: sound_kbps,
     };
+    let gpu = matches!(options.encoder, Encoder::Gpu(..));
+    let full = if gpu { GPU_FULL } else { FULL };
     let mut rates = match target {
-        Some(target) => fit(target, kept / speed, source.is_some(), audio).min(ceiling),
+        Some(target) => {
+            let rates = fit(target, kept / speed, source.is_some(), audio);
+            let aim = if gpu { GPU_AIM } else { 1.0 };
+            Bitrates { video_kbps: (rates.video_kbps as f64 * aim) as u32, ..rates }.min(ceiling)
+        }
         None => unlimited,
     };
+    let base = Settings {
+        start,
+        end: (end < probe.duration - 0.001).then_some(end),
+        cuts: cuts.clone(),
+        speed,
+        video: source.is_some(),
+        audio,
+        height: chosen,
+        fps: source.map_or(30.0, |v| v.fps),
+        rate: options.rate(probe).filter(|_| source.is_some()),
+        container: out.container,
+        audio_codec: out.audio,
+        video_kbps: rates.video_kbps,
+        audio_kbps: rates.audio_kbps,
+        exact: target.is_some(),
+        stats: work.join("pass.log"),
+        encoder: options.encoder,
+        draft: false,
+        card: options.card,
+        fragments: false,
+    };
+    // A size limit also lowers the picture size to what the bitrate can carry for this video.
+    let difficulty = match (target, source) {
+        (Some(_), Some(v)) => Some((difficulty(transcoder, input, &base, (start, end), v.short_side(), work)?, v.short_side())),
+        _ => None,
+    };
+    // A graphics card's encoder makes no less than its floor: the picture is made small
+    // enough for it, and the floor raised to what a result too big showed.
+    let mut floor = gpu.then_some(if out.video == VideoCodec::Av1 { CARD_FLOOR.0 } else { CARD_FLOOR.1 });
     // Set once a result fits: the larger try goes here, so the one that fits stays.
     let mut larger: Option<std::path::PathBuf> = None;
     for attempt in 0..=MAX_RETRIES {
-        // A size limit also lowers the picture size to what the bitrate can carry.
-        let fitted = target.map(|_| side_for(rates.video_kbps));
+        let fitted = difficulty.map(|(d, side)| {
+            let side = side_for(rates.video_kbps, d, out.video, side);
+            floor.map_or(side, |floor| over_floor(side, rates.video_kbps, floor))
+        });
         let height = [chosen, fitted].into_iter().flatten().min().filter(|&h| source.is_some_and(|v| h < v.short_side()));
-        let settings = Settings {
-            start,
-            end: (end < probe.duration - 0.001).then_some(end),
-            cuts: cuts.clone(),
-            speed,
-            video: source.is_some(),
-            audio,
-            height,
-            fps: source.map_or(30.0, |v| v.fps),
-            rate: options.rate(probe).filter(|_| source.is_some()),
-            container: out.container,
-            audio_codec: out.audio,
-            video_kbps: rates.video_kbps,
-            audio_kbps: rates.audio_kbps,
-            exact: target.is_some(),
-            stats: work.join("pass.log"),
-            preset: options.preset,
-            draft: false,
-        };
+        let settings = Settings { height, video_kbps: rates.video_kbps, audio_kbps: rates.audio_kbps, ..base.clone() };
         let file = larger.as_deref().unwrap_or(output);
         transcoder.transcode(input, file, &settings, progress)?;
         let Some(target) = target else { return Ok(None) };
@@ -334,7 +430,7 @@ pub fn encode(
         if size <= target {
             // Too much of the limit left unused: one larger try, if the bitrates can grow.
             let next = scaled(MARGIN);
-            if !keep || size as f64 >= target as f64 * FULL || next.total() as f64 <= rates.total() as f64 * 1.01 {
+            if !keep || size as f64 >= target as f64 * full || next.total() as f64 <= rates.total() as f64 * 1.01 {
                 return Ok(None);
             }
             rates = next;
@@ -342,6 +438,13 @@ pub fn encode(
             continue;
         }
         // Too big: lower, unless they are as low as they go.
+        let made = size as f64 * 8.0 / 1000.0 / (kept / speed) - rates.audio_kbps as f64;
+        if let (Some(floor), Some(v)) = (floor.as_mut(), source)
+            && made > rates.video_kbps as f64 * 1.2
+        {
+            let side = height.unwrap_or(v.short_side());
+            *floor = floor.max(made / (side as f64 / SAMPLE_SIDE as f64).powf(FLOOR_POWER));
+        }
         let next = scaled(0.97);
         if !keep || next.total() >= rates.total() {
             return Ok(Some(Failure::new("jobs.overSize", json!({ "sizeMb": (size as f64 / 1e4).ceil() / 100.0 }))));
@@ -403,23 +506,27 @@ mod tests {
     #[test]
     fn edits_keep_the_codecs_of_a_copy() {
         let edit = Options { keep_codecs: true, audio_codec: AudioCodec::Mp3, ..Options::default() };
-        // Only the codecs differ: a copy, in the file's own codecs, H.265 too.
+        // A picture in the settings' codec: a copy, the file's own sound kept.
         assert!(!edit.needs_encode(&VIDEO));
         assert_eq!(edit.output(&VIDEO).audio, AudioCodec::Aac);
         assert!(!Options { format: Container::Mkv, ..edit.clone() }.needs_encode(&VIDEO));
+        // Another picture codec is re-encoded into the settings' one, with the chosen sound.
         let h265 = Probe { video: Some(VideoProbe { codec: Some(VideoCodec::H265), ..SIDE_1080 }), ..VIDEO };
-        assert!(!edit.needs_encode(&h265));
-        assert_eq!(edit.output(&h265).video, VideoCodec::H265);
-        // A re-encode for another reason writes H.264 and the chosen sound.
-        let trimmed = Options { start: Some(5.0), ..edit.clone() };
-        assert!(trimmed.needs_encode(&h265));
-        assert_eq!((trimmed.output(&h265).video, trimmed.output(&h265).audio), (VideoCodec::H264, AudioCodec::Mp3));
-        // A codec the file can't hold as it is, or one the app doesn't write, is re-encoded.
+        assert!(edit.needs_encode(&h265));
+        assert_eq!((edit.output(&h265).video, edit.output(&h265).audio), (VideoCodec::H264, AudioCodec::Mp3));
+        let av1 = Probe { video: Some(VideoProbe { codec: Some(VideoCodec::Av1), ..SIDE_1080 }), ..VIDEO };
+        assert!(edit.needs_encode(&av1));
+        assert_eq!(edit.output(&av1).video, VideoCodec::H264);
+        // H.264 too, when the settings ask for AV1; AV1 is then kept.
+        let to_av1 = Options { encoder: Encoder::Av1(8), ..edit.clone() };
+        assert!(to_av1.needs_encode(&VIDEO));
+        assert_eq!(to_av1.output(&VIDEO).video, VideoCodec::Av1);
+        assert!(!Options { format: Container::Mkv, ..to_av1.clone() }.needs_encode(&av1));
+        // MOV can't hold AV1: H.264, kept as it is.
+        assert!(!Options { format: Container::Mov, ..to_av1 }.needs_encode(&VIDEO));
+        // A codec the app doesn't write is re-encoded.
         let vp9 = Probe { video: Some(VideoProbe { codec: None, ..SIDE_1080 }), ..VIDEO };
         assert!(edit.needs_encode(&vp9));
-        let av1 = Probe { video: Some(VideoProbe { codec: Some(VideoCodec::Av1), ..SIDE_1080 }), ..VIDEO };
-        assert!(!Options { format: Container::Mkv, ..edit.clone() }.needs_encode(&av1));
-        assert!(Options { format: Container::Mov, ..edit }.needs_encode(&av1));
     }
 
     #[test]
@@ -434,11 +541,13 @@ mod tests {
         assert_eq!(out(Options { format: Container::Mkv, audio_codec: Pcm, ..o.clone() }, &VIDEO), (Container::Mkv, H264, Pcm));
         // A sound-only file sets its codec.
         assert_eq!(out(Options { format: Container::Flac, audio_codec: Mp3, ..o.clone() }, &VIDEO).2, Flac);
-        // MOV can't hold AV1: an edit of an AV1 file is re-encoded in H.264, the sound chosen.
+        // An edit of an AV1 file is re-encoded in the settings' codec (H.264 in MOV, which
+        // can't hold AV1), the sound chosen; one that asks for AV1 keeps it.
         let av1 = Probe { video: Some(VideoProbe { codec: Some(Av1), ..SIDE_1080 }), ..VIDEO };
         let edit = Options { keep_codecs: true, audio_codec: Mp3, ..o.clone() };
         assert_eq!(out(Options { format: Container::Mov, ..edit.clone() }, &av1), (Container::Mov, H264, Mp3));
-        assert_eq!(out(Options { format: Container::Mkv, ..edit }, &av1), (Container::Mkv, Av1, Aac));
+        assert_eq!(out(Options { format: Container::Mkv, ..edit.clone() }, &av1), (Container::Mkv, H264, Mp3));
+        assert_eq!(out(Options { format: Container::Mkv, encoder: Encoder::Av1(8), ..edit }, &av1), (Container::Mkv, Av1, Aac));
         assert_eq!(out(Options { format: Container::Mp4, audio_codec: Pcm, ..o.clone() }, &VIDEO), (Container::Mp4, H264, Aac));
         // A sound without a picture is saved as a sound file of its codec.
         let sound = Probe { video: None, ..VIDEO };
@@ -451,6 +560,41 @@ mod tests {
         assert_eq!(Options { format: Container::Mp3, audio_codec: Flac, ..limit.clone() }.target_bytes(&VIDEO), Some(5_000_000));
         // MOV can't hold FLAC: AAC, which takes the limit.
         assert_eq!(Options { format: Container::Mov, audio_codec: Flac, ..limit }.target_bytes(&VIDEO), Some(5_000_000));
+    }
+
+    #[test]
+    fn the_picture_codec_of_the_settings() {
+        use VideoCodec::*;
+        let av1 = Options { encoder: Encoder::Av1(8), ..Options::default() };
+        let codec_of = |o: &Options, probe: &Probe| (o.needs_encode(probe), o.output(probe).video);
+        // An H.264 picture is kept as it is; a re-encode writes AV1, except in MOV.
+        assert!(!av1.needs_encode(&VIDEO));
+        let trimmed = Options { start: Some(5.0), ..av1.clone() };
+        assert_eq!(codec_of(&trimmed, &VIDEO), (true, Av1));
+        assert_eq!(codec_of(&Options { format: Container::Mov, ..trimmed }, &VIDEO), (true, H264));
+        // Another codec is re-encoded into AV1; AV1 itself is kept.
+        let h265 = Probe { video: Some(VideoProbe { codec: Some(H265), ..SIDE_1080 }), ..VIDEO };
+        assert_eq!(codec_of(&av1, &h265), (true, Av1));
+        let source = Probe { video: Some(VideoProbe { codec: Some(Av1), ..SIDE_1080 }), ..VIDEO };
+        assert!(!av1.needs_encode(&source));
+        // A sound file has no picture codec to hold.
+        assert_eq!(Options { format: Container::M4a, ..av1.clone() }.output(&VIDEO).container, Container::M4a);
+
+        // AV1 keeps more pixels for a size: 5 MB over a minute stays 1080p, where H.264 gets 360p.
+        let (_, calls, _) = run(&[1.0], &Options { max_mb: Some(5.0), ..av1 });
+        assert_eq!((calls[0].encoder, calls[0].height), (Encoder::Av1(8), None));
+
+        // A graphics card is aimed 10 % lower, as it goes over.
+        let gpu = Encoder::Gpu(Av1, "av1_nvenc", 4);
+        let (_, gpu_calls, _) = run(&[1.1], &Options { max_mb: Some(5.0), encoder: gpu, ..Options::default() });
+        assert_eq!(gpu_calls[0].encoder, gpu);
+        assert_eq!(gpu_calls[0].video_kbps, (calls[0].video_kbps as f64 * GPU_AIM) as u32);
+        // Its result is kept from 88 % of the limit: one that meets its bitrate is not made again…
+        let gpu_limit = Options { max_mb: Some(5.0), encoder: gpu, ..Options::default() };
+        assert_eq!(run(&[1.0], &gpu_limit).1.len(), 1);
+        assert_eq!(run(&[1.07], &gpu_limit).1.len(), 1);
+        // …but one well under it is.
+        assert_eq!(run(&[0.9, 1.0], &gpu_limit).1.len(), 2);
     }
 
     #[test]
@@ -493,19 +637,34 @@ mod tests {
 
     #[test]
     fn picture_sizes() {
-        let sides: Vec<u32> = [5000, 2500, 1000, 400, 200, 30].into_iter().map(side_for).collect();
-        assert_eq!(sides, [1080, 1080, 480, 360, 240, 240]);
+        let sides = |difficulty, codec| [10000, 5200, 2600, 900, 400, 250, 100].map(|kbps| side_for(kbps, difficulty, codec, 1080));
+        // Measured on a detailed game recording at 60 fps (4300 kbps for the sample) and a calm
+        // one (430): x264 was best at these sizes…
+        assert_eq!(sides(4300.0, VideoCodec::H264)[..3], [1080, 720, 480]);
+        assert_eq!(sides(430.0, VideoCodec::H264)[2], 1080);
+        // …SVT-AV1 at 1080p down to its smallest file (about 980 kbps there, 540 at 720p).
+        assert_eq!(sides(4300.0, VideoCodec::Av1), [1080, 1080, 1080, 720, 480, 360, 240]);
+        // Never over the source's size.
+        assert_eq!(side_for(10000, 430.0, VideoCodec::H264, 720), 720);
     }
 
-    /// Writes files whose size follows the bitrate, `overshoot` times too big (or too small).
+    /// Writes files whose size follows the bitrate, `overshoot` times too big (or too small);
+    /// a sample (a draft) takes `difficulty` kbps.
     struct Fake {
         overshoot: RefCell<Vec<f64>>,
         calls: RefCell<Vec<Settings>>,
+        difficulty: f64,
+        samples: RefCell<Vec<Settings>>,
     }
 
     impl Transcoder for Fake {
         fn transcode(&self, _: &Path, output: &Path, s: &Settings, progress: &mut dyn FnMut(f64)) -> Result<(), Failure> {
             let seconds = (s.end.unwrap_or(60.0) - s.start) / s.speed;
+            if s.draft {
+                fs::write(output, vec![0u8; (self.difficulty * 125.0 * seconds) as usize]).unwrap();
+                self.samples.borrow_mut().push(s.clone());
+                return Ok(());
+            }
             let factor = self.overshoot.borrow_mut().remove(0);
             let bytes = (s.video_kbps + s.audio_kbps) as f64 * 125.0 * seconds * factor;
             fs::write(output, vec![0u8; bytes as usize]).unwrap();
@@ -516,7 +675,13 @@ mod tests {
     }
 
     fn run(overshoot: &[f64], options: &Options) -> (Result<Option<Failure>, Failure>, Vec<Settings>, u64) {
-        let fake = Fake { overshoot: RefCell::new(overshoot.to_vec()), calls: RefCell::default() };
+        let (result, calls, size, _) = run_with(2000.0, overshoot, options);
+        (result, calls, size)
+    }
+
+    /// With a video of `difficulty`; also gives the samples made.
+    fn run_with(difficulty: f64, overshoot: &[f64], options: &Options) -> (Result<Option<Failure>, Failure>, Vec<Settings>, u64, Vec<Settings>) {
+        let fake = Fake { overshoot: RefCell::new(overshoot.to_vec()), calls: RefCell::default(), difficulty, samples: RefCell::default() };
         static RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let work = std::env::temp_dir().join(format!("stash-edit-{}-{n}", std::process::id()));
@@ -527,7 +692,24 @@ mod tests {
         // Nothing left behind but the result.
         assert_eq!(fs::read_dir(&work).unwrap().count(), usize::from(size > 0));
         let _ = fs::remove_dir_all(work);
-        (result, fake.calls.into_inner(), size)
+        (result, fake.calls.into_inner(), size, fake.samples.into_inner())
+    }
+
+    #[test]
+    fn size_from_a_sample() {
+        // 4 s from the middle, at 720p, without sound, quick.
+        let limit = Options { start: Some(10.0), end: Some(50.0), max_mb: Some(4.0), ..Options::default() };
+        let (_, calls, _, samples) = run_with(2000.0, &[1.0], &limit);
+        let sample = &samples[0];
+        assert_eq!((sample.start, sample.end, sample.height, sample.audio, sample.draft), (28.0, Some(32.0), Some(720), false, true));
+        assert!(!calls[0].draft);
+        // A calm video keeps its size where a detailed one gets smaller.
+        let limit = Options { max_mb: Some(5.0), ..Options::default() };
+        assert_eq!(run_with(250.0, &[1.0], &limit).1[0].height, None);
+        assert_eq!(run_with(2000.0, &[1.0], &limit).1[0].height, Some(360));
+        assert_eq!(run_with(8000.0, &[1.0], &limit).1[0].height, Some(240));
+        // No sample without a limit.
+        assert!(run_with(2000.0, &[1.0], &Options { start: Some(5.0), ..Options::default() }).3.is_empty());
     }
 
     #[test]
@@ -556,6 +738,23 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!((calls[0].video_kbps, calls[0].height), (30, Some(240)));
         assert_eq!(result.unwrap().unwrap().key, "jobs.overSize");
+    }
+
+    /// A graphics card's encoder gets a picture small enough for its lowest bitrate, smaller
+    /// still after a result it could not bring down.
+    #[test]
+    fn card_floor() {
+        assert_eq!(over_floor(1080, 100, 115.0), 480);
+        assert_eq!(over_floor(1080, 300, 115.0), 1080);
+        assert_eq!(over_floor(1080, 10, 115.0), MIN_SIDE);
+        // About 100 kbps for the picture: the processor's AV1 keeps 1080p, the card's 480p.
+        let limit = Options { max_mb: Some(1.08), ..Options::default() };
+        let av1 = Options { encoder: Encoder::Av1(8), ..limit.clone() };
+        assert_eq!(run_with(300.0, &[1.0], &av1).1[0].height, None);
+        let card = Options { encoder: Encoder::Gpu(VideoCodec::Av1, "av1_nvenc", 4), ..limit };
+        let (_, calls, _, _) = run_with(300.0, &[2.5, 1.0, 1.0], &card);
+        assert_eq!(calls[0].height, Some(480));
+        assert!(calls[1].height < calls[0].height, "{:?}", calls[1].height);
     }
 
     #[test]

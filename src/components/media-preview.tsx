@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { formatDuration } from "@/lib/format";
+import { playParts } from "@/lib/parts";
 import { isAndroid } from "@/lib/platform";
 import { toResult, toSource, type Cuts } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
@@ -74,7 +75,8 @@ function paint(video: HTMLVideoElement, canvas: HTMLCanvasElement, height: numbe
 /** Plays `src` as the result will be: from `start` to `end` without the `cuts`, at `speed`,
  * muted or not, its picture drawn at the chosen `height` and frame rate (the stream is
  * played under a canvas it is copied into), then back to `start`. When an edge moves, it
- * shows the picture there. `onUnplayable` when the webview can't play it. */
+ * shows the picture there. `onUnplayable` when the webview can't play it. With `parts`, the
+ * video is made in parts as it plays. */
 export function ExtractPlayer({
   src,
   video,
@@ -86,6 +88,7 @@ export function ExtractPlayer({
   height = null,
   fps = null,
   sourceFps = null,
+  parts,
   onUnplayable,
 }: {
   src: string;
@@ -102,6 +105,8 @@ export function ExtractPlayer({
   fps?: number | null;
   /** The source's frame rate: a speed-up keeps it rather than packing in more frames. */
   sourceFps?: number | null;
+  /** The video `src` names is played in parts made from it: `load` makes the one from `from`. */
+  parts?: { duration: number; audio: boolean; load: (from: number, seconds: number) => Promise<ArrayBuffer> };
   onUnplayable: () => void;
 }) {
   const { t } = useTranslation();
@@ -117,9 +122,9 @@ export function ExtractPlayer({
   const total = toResult(stop, start, cuts, speed);
 
   // What the playback loop reads: it runs across renders.
-  const latest = useRef({ start, stop, cuts, speed, height, drawn });
+  const latest = useRef({ start, stop, cuts, speed, height, drawn, parts, onUnplayable });
   useEffect(() => {
-    latest.current = { start, stop, cuts, speed, height, drawn };
+    latest.current = { start, stop, cuts, speed, height, drawn, parts, onUnplayable };
   });
   // When the next picture is due, in animation frame time.
   const due = useRef(0);
@@ -162,6 +167,20 @@ export function ExtractPlayer({
     requestAnimationFrame(tick);
   }
 
+  // The parts of another file, or of a file played whole now, need another source.
+  const inParts = Boolean(parts);
+  useEffect(() => {
+    const m = media.current;
+    const parts = latest.current.parts;
+    if (!m || !parts) return;
+    return playParts(m, {
+      ...parts,
+      first: () => latest.current.start,
+      load: (from, seconds) => latest.current.parts?.load(from, seconds) ?? Promise.reject(new Error("no parts")),
+      onFail: () => latest.current.onUnplayable(),
+    });
+  }, [src, inParts]);
+
   const edges = useRef({ start, end });
   useEffect(() => {
     const m = media.current;
@@ -197,7 +216,8 @@ export function ExtractPlayer({
     ref: (element: HTMLMediaElement | null) => {
       media.current = element;
     },
-    src,
+    // Parts are given to it as they are made.
+    src: parts ? undefined : src,
     preload: "metadata",
     muted,
     className: "hidden",

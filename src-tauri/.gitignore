@@ -12,3 +12,5 @@
 # FFmpeg libraries built by ffmpeg/build.sh
 /ffmpeg/out/
 
+# Written by build.rs from src/features/edit/extensions.json
+/windows/extensions.nsh

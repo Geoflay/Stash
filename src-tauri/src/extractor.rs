@@ -234,7 +234,7 @@ static NEXT_INFO: AtomicU32 = AtomicU32::new(0);
 pub fn analyze(app: &AppHandle, url: &str) -> Result<Media, Failure> {
     let url = tiktok::resolve(url.trim())?;
     let (url, photo_link) = tiktok::normalize(&url);
-    let mut sponsor_block = crate::settings::load(&crate::data_dir(app)?).sponsor_block;
+    let mut sponsor_block = crate::saved_settings(app)?.sponsor_block;
     let mut attempt = 0;
     let out = loop {
         let mut args: Vec<String> = ["-J", "--no-playlist", "--flat-playlist"].map(String::from).to_vec();
@@ -506,7 +506,7 @@ pub fn failure(stderr: &str) -> Failure {
     let has = |words: &[&str]| words.iter().any(|w| text.contains(w));
     let key = if has(&["private video", "video is private", "account is private"]) {
         "errors.private"
-    } else if has(&["not a bot", "rate-limited", "http error 429", "too many requests"]) {
+    } else if has(&["not a bot", "rate-limited", "http error 429", "too many requests", "ip address is blocked", "ip may be blocked"]) {
         "errors.blocked"
     } else if has(&["sign in", "log in", "login", "cookies", "empty media response"]) {
         "errors.login"
@@ -730,6 +730,9 @@ mod tests {
         assert_eq!(key("ERROR: [youtube] x: Private video. Sign in if you've been granted access"), "errors.private");
         assert_eq!(key("ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies"), "errors.blocked");
         assert_eq!(key("ERROR: [youtube] x: HTTP Error 429: Too Many Requests"), "errors.blocked");
+        assert_eq!(key("ERROR: [TikTok] x: Your IP address is blocked from accessing this post"), "errors.blocked");
+        let vimeo = "ERROR: [vimeo] x: Got HTTP Error 403 when using impersonate target. If you are using a data center IP or VPN/proxy, your IP may be blocked";
+        assert_eq!(key(vimeo), "errors.blocked");
         assert_eq!(key("ERROR: [instagram] x: Requested content is not available, rate-limit reached or login required"), "errors.login");
         assert_eq!(key("ERROR: Unsupported URL: https://example.com/"), "errors.unsupported");
         assert_eq!(key("ERROR: 'abc' is not a valid URL."), "errors.unsupported");
@@ -750,4 +753,3 @@ mod tests {
         assert!(!retry(RETRIES, &failure("ERROR: unable to download video data: HTTP Error 403")));
     }
 }
-

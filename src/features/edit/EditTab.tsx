@@ -4,13 +4,14 @@ import { useState, type ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { ActionBar } from "@/components/action-bar";
+import { Card, TabColumns } from "@/components/card";
 import { EditableTitle } from "@/components/editable-title";
 import { ExtractPlayer, MiniPlayer } from "@/components/media-preview";
-import { Busy, ErrorNote } from "@/components/notice";
-import { Choice, EditOptions, FormatOptions, panelClass } from "@/components/options-panel";
+import { Busy, ErrorNote, Hint } from "@/components/notice";
+import { Choice, EditOptions, formatName, FormatOptions, MIN_FPS, panelClass } from "@/components/options-panel";
 import { PresetRow } from "@/components/preset-row";
 import { Button } from "@/components/ui/button";
-import { formatDuration, formatPercent, formatSize } from "@/lib/format";
+import { formatDuration, formatPercent, formatSize, joinDetails } from "@/lib/format";
 import { isAndroid } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { AUDIO_FORMATS, isAudioFormat, isLossless, outputOf, VIDEO_FORMATS, type Options } from "@/features/download/store";
@@ -20,11 +21,13 @@ import {
   copyOf,
   estimate,
   fixPreview,
+  hasPicture,
   HEIGHTS,
   lowerHeights,
   mediaSoundFile,
   pickFiles,
   presetOptions,
+  previewPart,
   removeFile,
   renameEditFile,
   resetFile,
@@ -42,8 +45,6 @@ import {
   type EditState,
 } from "./store";
 
-const MIN_FPS = 5;
-
 /** The kind of file and size, then the edits, of one file: `onChange` gets what changes. */
 function FileOptions({
   copy,
@@ -56,7 +57,7 @@ function FileOptions({
 }) {
   const { t } = useTranslation();
   const { media, format, height, options } = copy;
-  const video = media.width !== null && !isAudioFormat(format);
+  const video = hasPicture(copy);
   return (
     <>
       <FormatOptions
@@ -87,11 +88,11 @@ function FileOptions({
 /** What a copy is saved as, in short: kind of file, size, frame rate and estimate. */
 function summaryOf(t: TFunction, copy: Copy, size: number | null) {
   const { media, format, height, options } = copy;
-  const video = media.width !== null && !isAudioFormat(format);
+  const video = hasPicture(copy);
   const short = shortSide(media);
   const fps = options.fps ?? media.fps;
   return [
-    t(`options.formats.${format}`),
+    formatName(t, format),
     video && short && t("options.height", { height: height ?? short }),
     video && fps && t("options.fpsValue", { fps: Math.round(fps) }),
     size !== null && t("download.estimate", { size: formatSize(size) }),
@@ -101,13 +102,11 @@ function summaryOf(t: TFunction, copy: Copy, size: number | null) {
 /** The name the copy is saved as, the file's length, picture size and size, with
  * `children` (the buttons) beside them. */
 function FileCard({ media, title, children }: { media: EditFile["media"]; title: string; children: ReactNode }) {
-  const details = [
+  const details = joinDetails([
     formatDuration(media.duration),
     media.width !== null && media.height !== null && `${media.width} × ${media.height}`,
     formatSize(media.size),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  ]);
   return (
     <div className="flex flex-col gap-2 min-[480px]:flex-row min-[480px]:items-center">
       <div className="min-w-0 min-[480px]:flex-1">
@@ -139,7 +138,7 @@ function FileRow({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const own = Object.keys(file.own).length > 0;
-  const summary = [formatDuration(file.media.duration), ...summaryOf(t, copy, size)].filter(Boolean).join(" · ");
+  const summary = joinDetails([formatDuration(file.media.duration), ...summaryOf(t, copy, size)]);
   return (
     <li className="grid gap-2 py-2 first:pt-0 last:pb-0">
       <div className="flex items-center gap-1">
@@ -214,7 +213,7 @@ function CommonOptions({ state, settings }: { state: EditState; settings: Settin
         label={t("options.format")}
         value={format}
         onChange={(format) => setEditChoice({ format })}
-        items={ALL_FORMATS.map((f) => ({ value: f, label: f === "original" ? t("edit.originalFormat") : t(`options.formats.${f}`) }))}
+        items={ALL_FORMATS.map((f) => ({ value: f, label: formatName(t, f) }))}
       />
       {!sound && videos.length > 0 && (
         <Choice
@@ -235,9 +234,7 @@ function CommonOptions({ state, settings }: { state: EditState; settings: Settin
         fps={sound ? null : fps}
         sizeLimit={format === "original" || !isLossless(outputOf(format, settings))}
       />
-      {showFps && videos.some((f) => (f.media.fps ?? 0) < fps - 0.01) && (
-        <p className="text-xs text-muted-foreground">{t("edit.fpsHint")}</p>
-      )}
+      {showFps && videos.some((f) => (f.media.fps ?? 0) < fps - 0.01) && <Hint>{t("edit.fpsHint")}</Hint>}
     </div>
   );
 }
@@ -245,7 +242,7 @@ function CommonOptions({ state, settings }: { state: EditState; settings: Settin
 export function EditTab() {
   const { t } = useTranslation();
   const state = useEdit();
-  const { files, selected, opening, error, preset, dragging, previewPath, preparing, prepared } = state;
+  const { files, selected, opening, error, preset, dragging, previewPath, previewParts, preparing, prepared } = state;
   const settings = useSettings((s) => s.settings);
   // The file the mini-player shows; another file closes it.
   const [previewed, setPreviewed] = useState<string | null>(null);
@@ -256,10 +253,7 @@ export function EditTab() {
   const previewing = shown !== undefined && previewed === shown.media.path;
   const total = sizes.every((s) => s !== null) ? sizes.reduce((sum, s) => sum + (s ?? 0), 0) : null;
   const details = batch
-    ? [
-        state.format === "original" ? t("edit.originalFormat") : t(`options.formats.${state.format}`),
-        total !== null && t("edit.total", { size: formatSize(total) }),
-      ]
+    ? [formatName(t, state.format), total !== null && t("edit.total", { size: formatSize(total) })]
     : shown && summaryOf(t, shown, sizes[0]);
 
   const button = (label: string, icon: ReactNode, onClick: () => void, className: string) => (
@@ -274,11 +268,8 @@ export function EditTab() {
   const showExtract = (path: string) => setPreviewed(path);
 
   return (
-    <div className={cn("mx-auto grid w-full grid-cols-1 gap-3 lg:items-start", shown ? "max-w-5xl lg:grid-cols-2" : "max-w-2xl")}>
-      <section
-        className={cn("grid gap-3 rounded-xl border bg-card p-3 sm:p-4", dragging && "border-primary bg-primary/5")}
-        aria-busy={opening}
-      >
+    <TabColumns wide={shown !== undefined}>
+      <Card className={cn(dragging && "border-primary bg-primary/5")} aria-busy={opening}>
         {/* Once files are open, their names take the place of the prompt. */}
         {batch ? (
           <>
@@ -317,10 +308,10 @@ export function EditTab() {
         {error && <ErrorNote error={error} />}
 
         {opening && <Busy>{t("edit.opening")}</Busy>}
-      </section>
+      </Card>
 
       {shown && (
-        <section className="grid gap-3 rounded-xl border bg-card p-3 sm:p-4">
+        <Card>
           {batch ? (
             <>
               <h2 className="text-sm font-medium">{t("edit.common")}</h2>
@@ -342,7 +333,7 @@ export function EditTab() {
               />
             </div>
           )}
-        </section>
+        </Card>
       )}
 
       {shown && previewing && (
@@ -354,14 +345,19 @@ export function EditTab() {
           ) : previewPath ? (
             <ExtractPlayer
               src={convertFileSrc(previewPath)}
-              video={shown.media.width !== null && !isAudioFormat(shown.format)}
+              video={hasPicture(shown)}
               start={shown.options.start ?? 0}
               end={shown.options.end ?? shown.media.duration}
               speed={shown.options.speed}
-              muted={shown.options.mute && shown.media.width !== null && !isAudioFormat(shown.format)}
+              muted={shown.options.mute && hasPicture(shown)}
               height={shown.height}
               fps={shown.options.fps}
               sourceFps={shown.media.fps}
+              parts={
+                previewParts
+                  ? { duration: shown.media.duration, audio: shown.media.audio, load: (from, seconds) => previewPart(previewPath, from, seconds) }
+                  : undefined
+              }
               onUnplayable={() => void fixPreview()}
             />
           ) : (
@@ -373,7 +369,7 @@ export function EditTab() {
       {shown && (
         <ActionBar
           title={batch ? t("edit.fileCount", { count: files.length }) : shown.title}
-          details={(details ?? []).filter(Boolean).join(" · ")}
+          details={joinDetails(details ?? [])}
           onPreview={() => setPreviewed(previewing ? null : shown.media.path)}
           previewing={previewing}
         >
@@ -383,6 +379,6 @@ export function EditTab() {
           </Button>
         </ActionBar>
       )}
-    </div>
+    </TabColumns>
   );
 }

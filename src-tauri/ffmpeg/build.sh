@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Builds the static FFmpeg 8 + x264 libraries the app links, with vcpkg:
+# Builds the static FFmpeg 8 + x264 + SVT-AV1 libraries the app links, with vcpkg (and, on
+# Windows, the NVIDIA and AMD graphics card encoders, which load the driver when used):
 #   ffmpeg/build.sh windows
 #   ffmpeg/build.sh android
 # Needs VCPKG_ROOT (a vcpkg checkout) and ANDROID_HOME (the SDK, with NDK 28.2, and an
-# NDK that ships libclang.dll, which reads the FFmpeg headers for Rust).
+# NDK that ships libclang.dll, which reads the FFmpeg headers for Rust); on Windows, LLVM too
+# (in C:\Program Files\LLVM, or LLVM_HOME).
 # vcpkg fetches its own MSYS2, nasm and pkgconf; nothing else to install.
 # Result: ffmpeg/out/{include,lib/x64,lib/arm64}, outside target/ so that cargo clean keeps
 # it, and ../.cargo/config.toml (at the
@@ -20,10 +22,17 @@ esac
 
 # Every decoder and demuxer, to read any file; only the encoders, muxers and filters the app
 # uses (media/encode.rs, Container::muxer), and local files only.
-options="--disable-encoders --enable-encoder=libx264,aac,flac,pcm_s16le,libmp3lame
+options="--disable-encoders --enable-encoder=libx264,libsvtav1,h264_nvenc,av1_nvenc,h264_amf,av1_amf,aac,flac,pcm_s16le,libmp3lame
   --disable-muxers --enable-muxer=mp4,mov,matroska,mp3,flac,wav
   --disable-filters --enable-filter=buffer,abuffer,buffersink,abuffersink,null,anull,trim,atrim,setpts,asetpts,fps,transpose,hflip,vflip,scale,pad,setsar,format,aformat,aresample,atempo
   --disable-protocols --enable-protocol=file --disable-network"
+# On Windows, NVIDIA cards also resize the pictures they decode (scale_cuda), so that they
+# never leave the card. Its program for the card is compiled by LLVM's clang.
+if [ "$1" = windows ]; then
+  clang="${LLVM_HOME:-/c/Program Files/LLVM}/bin/clang.exe"
+  [ -x "$clang" ] || { echo "no $clang: install LLVM (winget install LLVM.LLVM) or set LLVM_HOME" >&2; exit 1; }
+  options+=" --enable-filter=scale_cuda --enable-cuda-llvm --nvcc=$(cygpath -s -m "$clang")"
+fi
 
 # vcpkg's FFmpeg port takes no configure options: build from a copy of it that adds them.
 root=out
@@ -34,6 +43,11 @@ cp -r "$VCPKG_ROOT/ports/ffmpeg" "$port"
 anchor='set(OPTIONS_RELEASE "--enable-optimizations")'
 grep -qxF "$anchor" "$port/portfile.cmake" || { echo "vcpkg's ffmpeg port changed: update $0" >&2; exit 1; }
 sed -i "s|^set(OPTIONS_RELEASE \"--enable-optimizations\")\$|set(OPTIONS_RELEASE \"--enable-optimizations $(echo $options)\")|" "$port/portfile.cmake"
+# Nor does it offer SVT-AV1 (the AV1 encoder): an "svt-av1" feature, next to x264's.
+anchor='if("x264" IN_LIST FEATURES)'
+grep -qxF "$anchor" "$port/portfile.cmake" && grep -q '^    "x264": {$' "$port/vcpkg.json" || { echo "vcpkg's ffmpeg port changed: update $0" >&2; exit 1; }
+sed -i 's|^if("x264" IN_LIST FEATURES)$|if("svt-av1" IN_LIST FEATURES)\n    set(OPTIONS "${OPTIONS} --enable-libsvtav1")\nendif()\n&|' "$port/portfile.cmake"
+sed -i 's|^    "x264": {$|    "svt-av1": {\n      "description": "AV1 encoding via SVT-AV1",\n      "dependencies": ["svt-av1"]\n    },\n&|' "$port/vcpkg.json"
 
 "$VCPKG_ROOT/vcpkg" install --x-manifest-root=. --x-install-root="$root/vcpkg-$1" \
   --overlay-triplets=triplets --overlay-ports="$root/ports" --triplet "$triplet"

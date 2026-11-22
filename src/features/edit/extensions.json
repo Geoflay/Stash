@@ -1,0 +1,4 @@
+{
+  "video": ["mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "ts", "mts", "m2ts", "3gp", "mpg", "mpeg", "ogv"],
+  "sound": ["m4a", "mp3", "wav", "flac", "ogg", "opus", "aac", "wma"]
+}

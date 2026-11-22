@@ -1,6 +1,7 @@
 import { BookmarkPlus } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Hint } from "@/components/notice";
 import { Row } from "@/components/options-panel";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -78,7 +79,7 @@ export function PresetRow({
             }}
           >
             <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} aria-label={t("presets.name")} placeholder={t("presets.name")} />
-            <p className="min-h-4 text-xs text-muted-foreground">{replaces && t("presets.replaces")}</p>
+            <Hint className="min-h-4">{replaces && t("presets.replaces")}</Hint>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setNaming(false)}>
                 {t("presets.cancel")}

@@ -1,15 +1,18 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect } from "react";
 import { create } from "zustand";
+import { useSubscription } from "@/lib/events";
 import {
+  capSize,
   isAudioFormat,
   isLossless,
   noOptions,
+  encodedCodec,
   outputOf,
+  patchOptions,
+  presetEdits,
   requestOptions,
-  setsPresetOption,
   SOUND_FILE,
   soundFile,
   startJob,
@@ -21,6 +24,8 @@ import {
 } from "@/features/download/store";
 import { findPreset, useSettings, type Failure, type Preset, type Settings } from "@/features/settings/settings";
 import { isAndroid } from "@/lib/platform";
+// Also the files Explorer's "Edit with Stash" shows on (src-tauri/build.rs).
+import EXTENSIONS from "./extensions.json";
 
 /** A file opened for editing, as `open_media` describes it. */
 export interface LocalMedia {
@@ -87,6 +92,8 @@ export interface EditState {
   dragging: boolean;
   /** What the preview plays: the file, a playable copy of it, or nothing it can play. */
   previewPath: string | null;
+  /** The file is played in parts the core makes as it plays. */
+  previewParts: boolean;
   /** A playable copy is being made. */
   preparing: boolean;
   /** How much of it is made, 0 to 1. */
@@ -105,6 +112,7 @@ export const useEdit = create<EditState>(() => ({
   preset: null,
   dragging: false,
   previewPath: null,
+  previewParts: false,
   preparing: false,
   prepared: 0,
 }));
@@ -165,6 +173,11 @@ export function copyOf(state: Pick<EditState, "format" | "height" | "options">, 
   return { media: file.media, title: file.title, ...settle(file.media, { ...common(state), ...file.own }, settings) };
 }
 
+/** The copy keeps a picture: a video saved as a video file. */
+export function hasPicture({ media, format }: Pick<Copy, "media" | "format">): boolean {
+  return media.width !== null && !isAudioFormat(format);
+}
+
 /** `copy` as one object, to compare an option with. */
 const flat = ({ format, height, options }: Pick<Copy, "format" | "height" | "options">): Choices => ({ ...options, format, height });
 
@@ -193,12 +206,12 @@ function withFiles(state: EditState, files: EditFile[]): Partial<EditState> {
 /** Shows `index` in the preview. */
 export function selectFile(index: number) {
   const { files, selected } = useEdit.getState();
-  if (index !== selected) set({ selected: index, previewPath: files[index]?.media.path ?? null, preparing: false });
+  if (index !== selected) set({ selected: index, previewPath: files[index]?.media.path ?? null, previewParts: false, preparing: false });
 }
 
 /** Changes the common options (with one file, its options). */
 export function setEditOptions(patch: Partial<Options>) {
-  set(({ options, preset }) => ({ options: { ...options, ...patch }, preset: setsPresetOption(patch) ? null : preset }));
+  set(patchOptions(patch));
 }
 
 /** Changes the common kind of file or size. */
@@ -235,22 +248,20 @@ export function removeFile(index: number) {
     const selected = Math.max(0, Math.min(state.selected > index ? state.selected - 1 : state.selected, files.length - 1));
     const shown = files[selected]?.media.path ?? null;
     const moved = shown !== state.files[state.selected]?.media.path;
-    return { ...withFiles(state, files), selected, ...(moved && { previewPath: shown, preparing: false }) };
+    return { ...withFiles(state, files), selected, ...(moved && { previewPath: shown, previewParts: false, preparing: false }) };
   });
 }
 
 /** The options a preset made now would hold. */
 export function presetOptions(state: EditState): Omit<Preset, "name"> {
-  const { mute, speed, fps, maxMb } = state.options;
-  return { format: state.format, height: state.height, mute, speed, fps, maxMb };
+  return { format: state.format, height: state.height, ...presetEdits(state.options) };
 }
 
 /** Applies `preset`: with one file, as far as the file allows; with several, to the
  * common options, each file settling them for itself. */
 export function applyPreset(preset: Preset) {
   set((state) => {
-    const { mute, speed, fps, maxMb } = preset;
-    const options = { ...state.options, mute, speed, fps, maxMb };
+    const options = { ...state.options, ...presetEdits(preset) };
     const [only, more] = state.files;
     if (!only || more) return { preset: preset.name, format: preset.format, height: heightUpTo(HEIGHTS, preset.height), options };
     const short = shortSide(only.media);
@@ -293,6 +304,7 @@ export async function openFiles(paths: string[], add = false) {
       height: null,
       options: noOptions,
       previewPath: first.media.path,
+      previewParts: false,
       preparing: false,
     });
     const preset = findPreset(state.preset);
@@ -305,13 +317,14 @@ export async function openFiles(paths: string[], add = false) {
 /** Opens a file in place of those open. */
 export const openFile = (path: string) => openFiles([path]);
 
-/** The preview can't play the file: plays a copy the core makes, or nothing if that fails too. */
+/** The preview can't play the file: plays a copy the core makes, or the video in parts it
+ * makes as it plays, or nothing if that fails too. */
 export async function fixPreview() {
-  const { files, selected, previewPath, preparing } = useEdit.getState();
+  const { files, selected, previewPath, previewParts, preparing } = useEdit.getState();
   const media = files[selected]?.media;
   if (!media || preparing) return;
-  if (previewPath !== media.path) {
-    set({ previewPath: null });
+  if (previewPath !== media.path || previewParts) {
+    set({ previewPath: null, previewParts: false });
     return;
   }
   set({ preparing: true, prepared: 0 });
@@ -322,18 +335,19 @@ export async function fixPreview() {
   const onProgress = new Channel<number>((prepared) => {
     if (shown()) set({ prepared });
   });
-  const copy = await invoke<string>("preview_media", { path: media.path, onProgress }).catch(() => null);
+  const copy = await invoke<string | null>("preview_media", { path: media.path, onProgress }).catch(() => undefined);
   // Another file may be shown meanwhile.
-  if (shown()) set({ previewPath: copy, preparing: false });
+  if (!shown()) return;
+  set(copy === null ? { previewParts: true, preparing: false } : { previewPath: copy ?? null, preparing: false });
 }
 
-/** The files FFmpeg reads, by extension (Windows) or MIME type (Android). */
-const EXTENSIONS = ["mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "ts", "mts", "m2ts", "3gp", "mpg", "mpeg", "ogv"];
-const SOUND_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "ogg", "opus", "aac", "wma"];
+/** Part of a video played in parts: `seconds` of it from `from`. */
+export const previewPart = (path: string, from: number, seconds: number) => invoke<ArrayBuffer>("preview_part", { path, from, seconds });
 
 /** Lets the user pick video or sound files: several, or one with `single`. */
 export async function pickFiles({ add = false, single = false } = {}) {
-  const extensions = isAndroid ? ["video/*", "audio/*"] : [...EXTENSIONS, ...SOUND_EXTENSIONS];
+  // The files FFmpeg reads, by extension (Windows) or MIME type (Android).
+  const extensions = isAndroid ? ["video/*", "audio/*"] : [...EXTENSIONS.video, ...EXTENSIONS.sound];
   const picked = await open({ multiple: !single, filters: [{ name: "Video or sound", extensions }] });
   const paths = [picked ?? []].flat();
   if (paths.length) await openFiles(single ? paths.slice(0, 1) : paths, add);
@@ -347,8 +361,7 @@ const SOUND_BYTES = 16_000;
  * codecs than the file's, unless a limit caps it. */
 export function estimate({ media, format, height, options }: Copy, settings: Settings | null): number | null {
   const output = outputOf(format, settings);
-  const limit = options.maxMb && !isLossless(output) ? options.maxMb * 1e6 : null;
-  if (!media.duration) return limit;
+  if (!media.duration) return capSize(null, options, output);
   const kept = ((options.end ?? media.duration) - (options.start ?? 0)) / options.speed / media.duration;
   const short = shortSide(media);
   const scale = height !== null && short ? (height / short) ** 2 : 1;
@@ -360,14 +373,15 @@ export function estimate({ media, format, height, options }: Copy, settings: Set
     const copied = media.width === null && media.audioCodec !== null && SOUND_FILE[media.audioCodec] === format;
     size = copied ? media.size * kept : isLossless(output) ? null : sound * kept;
   } else {
-    // A copy keeps the file's codecs; a re-encode in the same ones keeps about its bitrate.
+    // A copy (a picture already in the settings' codec) keeps the file's sound; a re-encode
+    // in the same codecs keeps about its bitrate.
     const reshapes = Math.abs(kept - 1) > 0.001 || scale < 1 || frames < 1;
-    const writable = media.videoCodec !== null && (!media.audio || media.audioCodec !== null);
-    const same = media.videoCodec === "h264" && (!media.audio || options.mute || output.audioCodec === media.audioCodec);
-    size = (reshapes ? same : writable || same) ? ((media.size - sound) * scale * frames + (options.mute ? 0 : sound)) * kept : null;
+    const picture = media.videoCodec === encodedCodec(format, settings);
+    const copied = picture && (!media.audio || media.audioCodec !== null);
+    const same = picture && (!media.audio || options.mute || output.audioCodec === media.audioCodec);
+    size = (reshapes ? same : copied || same) ? ((media.size - sound) * scale * frames + (options.mute ? 0 : sound)) * kept : null;
   }
-  if (size === null) return limit;
-  return limit ? Math.min(size, limit) : size;
+  return capSize(size, options, output);
 }
 
 /** Starts saving a copy of every file open, each under its title. */
@@ -376,7 +390,7 @@ export async function saveCopies() {
   const settings = settingsNow();
   for (const file of state.files) {
     const { media, title, format, height, options } = copyOf(state, file, settings);
-    // A copy that needs no re-encode keeps the file's own codecs.
+    // A copy that needs no re-encode, its picture in the settings' codec, keeps the file's own codecs.
     const request = { path: media.path, title, options: { ...requestOptions(options, outputOf(format, settings)), height, keepCodecs: true } };
     try {
       await startJob({ command: "start_edit", request }, title);
@@ -388,14 +402,13 @@ export async function saveCopies() {
 
 /** Windows: files dropped anywhere on the window open in the Edit tab, after those open. */
 export function useFileDrop() {
-  useEffect(() => {
-    if (isAndroid) return;
-    const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => {
+  useSubscription(async () => {
+    if (isAndroid) return () => {};
+    return getCurrentWebview().onDragDropEvent(({ payload }) => {
       // "over" comes with every mouse move: only a change is set.
       const dragging = payload.type === "enter" || payload.type === "over";
       if (dragging !== useEdit.getState().dragging) set({ dragging });
       if (payload.type === "drop" && payload.paths.length) void openFiles(payload.paths, true);
     });
-    return () => void unlisten.then((stop) => stop());
-  }, []);
+  });
 }

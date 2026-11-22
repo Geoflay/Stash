@@ -1,20 +1,26 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
 import { EditableTitle } from "@/components/editable-title";
-import { ErrorNote } from "@/components/notice";
-import { Choice } from "@/components/options-panel";
+import { ErrorNote, Hint } from "@/components/notice";
+import { Choice, formatName } from "@/components/options-panel";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Segmented } from "@/components/segmented";
 import { AUDIO_CODECS } from "@/features/download/store";
+import { joinDetails } from "@/lib/format";
 import { isAndroid } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
-  ENCODER_PRESETS,
+  AV1_PRESETS,
+  GPU_PRESETS,
+  H264_PRESETS,
+  PRIORITIES,
   SPONSOR_CATEGORIES,
+  VIDEO_CODECS,
   cookiesImported,
   deletePreset,
   renamePreset,
@@ -45,20 +51,36 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** Numbered presets: the slowest and the fastest are named, the others are numbers. */
+function numbered(presets: number[], slowest: number, fastest: number) {
+  const end = (preset: number) => (preset === slowest ? "slowest" : preset === fastest ? "fastest" : undefined);
+  return (t: TFunction) => presets.map((p) => ({ value: String(p), label: t("settings.numberedPresets", { context: end(p), preset: p }) }));
+}
+const av1Items = numbered(AV1_PRESETS, 0, 13);
+const gpuItems = numbered(GPU_PRESETS, 7, 1);
+
 /** What a preset sets, in short. */
 function usePresetSummary() {
   const { t } = useTranslation();
   return ({ format, height, mute, speed, fps, maxMb }: Preset) =>
-    [
-      format === "original" ? t("edit.originalFormat") : t(`options.formats.${format}`),
+    joinDetails([
+      formatName(t, format),
       height !== null && t("options.height", { height }),
       mute && t("options.mute"),
       speed !== 1 && t("presets.speed", { speed }),
       fps !== null && t("presets.fps", { fps }),
       maxMb !== null && t("presets.maxMb", { mb: maxMb }),
-    ]
-      .filter(Boolean)
-      .join(" · ");
+    ]);
+}
+
+/** A setting turned on or off. */
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex min-h-field items-center justify-between gap-2 text-sm">
+      {label}
+      <Switch checked={checked} onCheckedChange={onChange} />
+    </label>
+  );
 }
 
 export function SettingsDialog({
@@ -177,12 +199,52 @@ export function SettingsDialog({
               items={AUDIO_CODECS.mkv.map((c) => ({ value: c, label: t(`options.codecs.${c}`) }))}
             />
             <Choice
-              label={t("settings.preset")}
-              value={settings.preset}
-              onChange={(preset) => onChange({ preset })}
-              items={ENCODER_PRESETS.map((p) => ({ value: p, label: t(`settings.presets.${p}`) }))}
+              label={t("settings.videoCodec")}
+              value={settings.videoCodec}
+              onChange={(videoCodec) => onChange({ videoCodec })}
+              items={VIDEO_CODECS.map((c) => ({ value: c, label: t(`settings.videoCodecs.${c}`) }))}
             />
+            {/* Each encoder has its own presets, each kept. */}
+            {settings.videoCodec === "av1" ? (
+              <Choice
+                label={t("settings.preset")}
+                value={String(settings.av1Preset)}
+                onChange={(preset) => onChange({ av1Preset: Number(preset) })}
+                items={av1Items(t)}
+              />
+            ) : (
+              <Choice
+                label={t("settings.preset")}
+                value={settings.h264Preset}
+                onChange={(h264Preset) => onChange({ h264Preset })}
+                items={H264_PRESETS.map((p) => ({ value: p, label: t(`settings.h264Presets.${p}`) }))}
+              />
+            )}
           </div>
+        </Row>
+
+        <Row label={t("settings.encoding")}>
+          <Choice
+            label={t("settings.priority")}
+            value={settings.encodingPriority}
+            onChange={(encodingPriority) => onChange({ encodingPriority })}
+            items={PRIORITIES.map((p) => ({ value: p, label: t(`settings.priorities.${p}`) }))}
+          />
+          {/* Phones' encoders lose too much detail at the sizes asked. */}
+          {!isAndroid && (
+            <>
+              <Toggle label={t("settings.gpu")} checked={settings.gpu} onChange={(gpu) => onChange({ gpu })} />
+              <Hint>{t("settings.gpuHint")}</Hint>
+              {settings.gpu && (
+                <Choice
+                  label={t("settings.gpuPreset")}
+                  value={String(settings.gpuPreset)}
+                  onChange={(preset) => onChange({ gpuPreset: Number(preset) })}
+                  items={gpuItems(t)}
+                />
+              )}
+            </>
+          )}
         </Row>
 
         <Row label={t("settings.presetList")}>
@@ -223,7 +285,7 @@ export function SettingsDialog({
             onChange={(value) => onChange({ maxJobs: Number(value) })}
             options={JOB_LIMITS.map((value) => ({ value, label: value }))}
           />
-          <p className="text-xs text-muted-foreground">{t("settings.maxJobsHint")}</p>
+          <Hint>{t("settings.maxJobsHint")}</Hint>
         </Row>
 
         <section className="grid gap-2">
@@ -261,10 +323,7 @@ export function SettingsDialog({
               {t("settings.ytdlpCheck")}
             </Button>
           </div>
-          <label className="flex min-h-field items-center justify-between gap-2 text-sm">
-            {t("settings.autoUpdate")}
-            <Switch checked={settings.autoUpdate} onCheckedChange={(autoUpdate) => onChange({ autoUpdate })} />
-          </label>
+          <Toggle label={t("settings.autoUpdate")} checked={settings.autoUpdate} onChange={(autoUpdate) => onChange({ autoUpdate })} />
         </Row>
 
         <Row label={t("settings.cookies")}>
@@ -281,7 +340,7 @@ export function SettingsDialog({
               {t("settings.import")}
             </Button>
           </div>
-          <p className="text-xs text-muted-foreground">{t("settings.cookiesHint")}</p>
+          <Hint>{t("settings.cookiesHint")}</Hint>
         </Row>
 
         {error && <ErrorNote error={error} />}

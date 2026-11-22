@@ -31,3 +31,14 @@ export function formatSize(bytes: number): string {
 export function formatPercent(fraction: number): string {
   return new Intl.NumberFormat(i18n.language, { style: "percent" }).format(fraction);
 }
+
+/** A line of details, those left out (false, null, empty) skipped: "MP4 · 720p · About 5 MB". */
+export function joinDetails(parts: unknown[]): string {
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** A number typed in a field, when above 0; `null` when empty or not. */
+export function positiveNumber(text: string): number | null {
+  const n = Number(text);
+  return text && n > 0 ? n : null;
+}

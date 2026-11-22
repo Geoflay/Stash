@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useState, type ComponentProps, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { Segmented } from "@/components/segmented";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -15,12 +16,20 @@ import {
   type Options,
 } from "@/features/download/store";
 import i18n from "@/i18n";
-import { formatSize, formatTime } from "@/lib/format";
+import { formatSize, formatTime, positiveNumber } from "@/lib/format";
 
 export interface QualityOption {
   value: string;
   label: string;
   size: number | null;
+}
+
+/** The lowest frame rate offered. */
+export const MIN_FPS = 5;
+
+/** The name of a kind of file; `original` keeps each file's own. */
+export function formatName(t: TFunction, format: Format | "original"): string {
+  return format === "original" ? t("edit.originalFormat") : t(`options.formats.${format}`);
 }
 
 function formatSpeed(speed: number) {
@@ -153,7 +162,7 @@ export function FormatOptions({
         label={t("options.format")}
         value={format}
         onChange={onFormat}
-        items={(sound ? AUDIO_FORMATS : VIDEO_FORMATS).map((f) => ({ value: f, label: t(`options.formats.${f}`) }))}
+        items={(sound ? AUDIO_FORMATS : VIDEO_FORMATS).map((f) => ({ value: f, label: formatName(t, f) }))}
       />
       {!sound && (
         <Choice
@@ -261,10 +270,7 @@ export function EditOptions({
               min={0}
               step="any"
               value={options.maxMb ?? ""}
-              onChange={(e) => {
-                const mb = Number(e.target.value);
-                onOptions({ maxMb: e.target.value && mb > 0 ? mb : null });
-              }}
+              onChange={(e) => onOptions({ maxMb: positiveNumber(e.target.value) })}
               placeholder={t("options.noLimit")}
               aria-label={t("options.sizeLimit")}
               className="min-w-0 flex-1"
@@ -276,8 +282,6 @@ export function EditOptions({
     </>
   );
 }
-
-const MIN_FPS = 5;
 
 /** Frames per second, from 5 up to the source's; the source's means no change. */
 function FrameRate({ source, value, onChange }: { source: number; value: number | null; onChange: (fps: number | null) => void }) {

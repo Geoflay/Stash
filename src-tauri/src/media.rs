@@ -100,7 +100,7 @@ impl Container {
     }
 
     /// The picture codecs a video file of this kind holds (none for a sound file): a source
-    /// in one of them can be copied as it is. Only H.264 is ever encoded.
+    /// in one of them can be copied as it is. H.264 and AV1 are encoded.
     pub fn video_codecs(self) -> &'static [VideoCodec] {
         use VideoCodec::*;
         match self {
@@ -128,27 +128,89 @@ impl Container {
     }
 }
 
-/// How hard the picture encoder works: a faster preset makes a slightly larger or rougher file.
+/// How hard x264 works: a faster preset makes a larger or rougher file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Preset {
+pub enum H264Preset {
+    Ultrafast,
+    Superfast,
     Veryfast,
     #[default]
     Faster,
+    Fast,
     Medium,
     Slow,
+    Slower,
+    Veryslow,
+    Placebo,
 }
 
-impl Preset {
+impl H264Preset {
     /// The preset of x264.
     fn name(self) -> &'static str {
         match self {
-            Preset::Veryfast => "veryfast",
-            Preset::Faster => "faster",
-            Preset::Medium => "medium",
-            Preset::Slow => "slow",
+            H264Preset::Ultrafast => "ultrafast",
+            H264Preset::Superfast => "superfast",
+            H264Preset::Veryfast => "veryfast",
+            H264Preset::Faster => "faster",
+            H264Preset::Fast => "fast",
+            H264Preset::Medium => "medium",
+            H264Preset::Slow => "slow",
+            H264Preset::Slower => "slower",
+            H264Preset::Veryslow => "veryslow",
+            H264Preset::Placebo => "placebo",
         }
     }
+}
+
+/// SVT-AV1's presets: 0 is the slowest and best, 13 the fastest.
+pub const AV1_PRESETS: std::ops::RangeInclusive<u8> = 0..=13;
+
+/// The picture encoder of a re-encode, at its preset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Encoder {
+    /// x264.
+    H264(H264Preset),
+    /// SVT-AV1, at a preset of [`AV1_PRESETS`].
+    Av1(u8),
+    /// A graphics card's encoder for the codec, by FFmpeg's name (see [`gpu_encoder`]), at a
+    /// preset of [`GPU_PRESETS`].
+    Gpu(VideoCodec, &'static str, u8),
+}
+
+/// The graphics card encoders' presets: NVIDIA's p1 (fastest) to p7 (slowest, best).
+pub const GPU_PRESETS: std::ops::RangeInclusive<u8> = 1..=7;
+
+impl Default for Encoder {
+    fn default() -> Self {
+        Encoder::H264(H264Preset::default())
+    }
+}
+
+impl Encoder {
+    pub fn codec(self) -> VideoCodec {
+        match self {
+            Encoder::H264(_) => VideoCodec::H264,
+            Encoder::Av1(_) => VideoCodec::Av1,
+            Encoder::Gpu(codec, ..) => codec,
+        }
+    }
+}
+
+/// The graphics card encoders FFmpeg has (on Windows), NVIDIA's before AMD's.
+const GPU_ENCODERS: [(VideoCodec, &str); 4] =
+    [(VideoCodec::H264, "h264_nvenc"), (VideoCodec::H264, "h264_amf"), (VideoCodec::Av1, "av1_nvenc"), (VideoCodec::Av1, "av1_amf")];
+
+/// The first graphics card encoder for `codec` that starts on this computer; `None` without
+/// one (no such card, or an older one without AV1). Tried once, when first asked.
+pub fn gpu_encoder(codec: VideoCodec, preset: u8) -> Option<Encoder> {
+    static WORKING: std::sync::OnceLock<Vec<(VideoCodec, &str)>> = std::sync::OnceLock::new();
+    let working = WORKING.get_or_init(|| {
+        init();
+        GPU_ENCODERS.into_iter().filter(|(_, name)| encode::starts(name)).collect()
+    });
+    let preset = preset.clamp(*GPU_PRESETS.start(), *GPU_PRESETS.end());
+    working.iter().find(|(c, _)| *c == codec).map(|&(c, name)| Encoder::Gpu(c, name, preset))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -314,6 +376,43 @@ pub fn probe(path: &Path) -> Result<Probe> {
     Ok(Probe { duration, video, audio: audio.is_some(), audio_codec })
 }
 
+/// Mends the jumps in an MPEG-TS file's timestamps, as ffmpeg does: HLS joins segments
+/// whose clock may restart (TED's intro, then the talk). A packet more than 0.1 s before,
+/// or 10 s after, where its stream was due moves the rest of the file to follow on.
+struct Clock {
+    /// Only a format whose timestamps may jump is mended.
+    mends: bool,
+    /// Seconds added to every timestamp from here on.
+    shift: f64,
+    /// Per stream: when its next packet is due (seconds, shifted).
+    due: Vec<Option<f64>>,
+}
+
+impl Clock {
+    fn new(input: &format::context::Input) -> Self {
+        let mends = unsafe { (*(*input.as_ptr()).iformat).flags & ffi::AVFMT_TS_DISCONT != 0 };
+        Clock { mends, shift: 0.0, due: vec![None; input.nb_streams() as usize] }
+    }
+
+    fn mend(&mut self, packet: &mut Packet, time_base: Rational) {
+        let Some(stamp) = packet.dts().or(packet.pts()).filter(|_| self.mends) else {
+            return;
+        };
+        let base = f64::from(time_base);
+        let index = packet.stream();
+        let time = stamp as f64 * base + self.shift;
+        if let Some(due) = self.due[index]
+            && !(due - 0.1..=due + 10.0).contains(&time)
+        {
+            self.shift += due - time;
+        }
+        let ticks = (self.shift / base).round() as i64;
+        packet.set_pts(packet.pts().map(|t| t + ticks));
+        packet.set_dts(packet.dts().map(|t| t + ticks));
+        self.due[index] = Some((stamp + ticks + packet.duration().max(0)) as f64 * base);
+    }
+}
+
 /// One file read for a remux, and where its streams go.
 struct Feed {
     path: PathBuf,
@@ -323,6 +422,7 @@ struct Feed {
     /// The file's start, taken off every timestamp (seconds).
     origin: f64,
     next: Option<Packet>,
+    clock: Clock,
     done: bool,
     /// When the picture's last keyframe read starts (seconds from the file's start): the
     /// packets after it go with it, kept or cut.
@@ -335,8 +435,12 @@ impl Feed {
         while self.next.is_none() && !self.done {
             let mut packet = Packet::empty();
             match packet.read(&mut self.input) {
-                Ok(()) if self.map.get(packet.stream()).is_some_and(Option::is_some) => self.next = Some(packet),
-                Ok(()) => {}
+                Ok(()) => {
+                    if let Some(&Some((_, time_base, _))) = self.map.get(packet.stream()) {
+                        self.clock.mend(&mut packet, time_base);
+                        self.next = Some(packet);
+                    }
+                }
                 Err(_) => self.done = true,
             }
         }
@@ -358,8 +462,13 @@ fn cut_points(path: &Path) -> Result<Vec<f64>> {
     let base = f64::from(input.stream(index).unwrap().time_base());
     let origin = origin(&input);
     let mut points = vec![input.duration() as f64 / AV_TIME_BASE];
-    for (stream, packet) in input.packets() {
-        if stream.index() == index && packet.is_key() {
+    let mut clock = Clock::new(&input);
+    for (stream, mut packet) in input.packets() {
+        if stream.index() != index {
+            continue;
+        }
+        clock.mend(&mut packet, stream.time_base());
+        if packet.is_key() {
             points.extend(packet.pts().or(packet.dts()).map(|t| t as f64 * base - origin));
         }
     }
@@ -415,7 +524,8 @@ pub fn remux(out: &Path, container: Container, tracks: &[(PathBuf, Kind)], cuts:
                 let input = open(path)?;
                 let streams = input.nb_streams() as usize;
                 let origin = origin(&input);
-                feeds.push(Feed { path: path.clone(), input, map: vec![None; streams], origin, next: None, done: false, keyframe: 0.0 });
+                let clock = Clock::new(&input);
+                feeds.push(Feed { path: path.clone(), input, map: vec![None; streams], origin, next: None, clock, done: false, keyframe: 0.0 });
                 feeds.last_mut().unwrap()
             }
         };
@@ -427,7 +537,7 @@ pub fn remux(out: &Path, container: Container, tracks: &[(PathBuf, Kind)], cuts:
         stream.set_time_base(source.time_base());
         feed.map[index] = Some((stream.index(), source.time_base(), *kind));
     }
-    write_header(&mut output, container)?;
+    write_header(&mut output, container, false)?;
     let out_bases: Vec<Rational> = output.streams().map(|s| s.time_base()).collect();
     let mut last_dts: Vec<Option<i64>> = vec![None; out_bases.len()];
 
@@ -450,9 +560,9 @@ pub fn remux(out: &Path, container: Container, tracks: &[(PathBuf, Kind)], cuts:
         packet.set_pts(packet.pts().map(|t| t - shift));
         packet.set_dts(packet.dts().map(|t| t - shift));
         packet.rescale_ts(time_base, out_bases[index]);
-        // Where parts join, rounding may repeat a time, which the file can't hold.
-        if !cuts.is_empty()
-            && let (Some(dts), Some(last)) = (packet.dts(), last_dts[index])
+        // Where parts join (cuts, or segments whose clock was mended), a time may repeat
+        // or overlap a little, which the file can't hold.
+        if let (Some(dts), Some(last)) = (packet.dts(), last_dts[index])
             && dts <= last
         {
             packet.set_dts(Some(last + 1));
@@ -472,37 +582,61 @@ pub fn preview_container(probe: &Probe) -> Container {
     if probe.video.is_some() { Container::Mp4 } else { Container::M4a }
 }
 
-/// A copy of `input` the webview can play: its tracks remuxed into MP4 (M4A for a sound)
-/// when they are H.264 and AAC or MP3, otherwise a quick H.264 + AAC encode, 480p at most,
-/// whose `progress` goes from 0 to 1.
-pub fn preview(input: &Path, out: &Path, probe: &Probe, stop: &dyn Fn() -> bool, progress: &mut dyn FnMut(f64)) -> Result<(), crate::Failure> {
+/// A copy of `input` the webview can play, written to `out`: its tracks remuxed into MP4
+/// (M4A for a sound) when they are H.264 and AAC or MP3, or a sound encoded to AAC, whose
+/// `progress` goes from 0 to 1. `false` when it is a video to encode: it is played in parts
+/// made as it plays (`preview_part`).
+pub fn preview(input: &Path, out: &Path, probe: &Probe, stop: &dyn Fn() -> bool, progress: &mut dyn FnMut(f64)) -> Result<bool, crate::Failure> {
     let video = probe.video.is_some();
     let container = preview_container(probe);
     let plays = probe.video.is_none_or(|v| v.codec == Some(VideoCodec::H264))
         && (!probe.audio || matches!(probe.audio_codec, Some(AudioCodec::Aac | AudioCodec::Mp3)));
     if plays && remux(out, container, &tracks(input, video, probe.audio), &[]).is_ok() {
-        return Ok(());
+        return Ok(true);
     }
+    if video {
+        return Ok(false);
+    }
+    Ffmpeg { stop }.transcode(input, out, &preview_settings(probe, out, false), progress)?;
+    Ok(true)
+}
+
+/// `seconds` of a video's preview from `from`, written to `out`: a quick H.264 + AAC encode,
+/// 480p at most, in a fragmented MP4 the webview appends to what it plays. The source is
+/// decoded on the graphics card with `card`.
+pub fn preview_part(input: &Path, out: &Path, probe: &Probe, from: f64, seconds: f64, card: bool, stop: &dyn Fn() -> bool) -> Result<(), crate::Failure> {
+    let end = from + seconds;
     let settings = Settings {
+        start: from,
+        end: (end < probe.duration).then_some(end),
+        fragments: true,
+        ..preview_settings(probe, out, card)
+    };
+    Ffmpeg { stop }.transcode(input, out, &settings, &mut |_| {})
+}
+
+fn preview_settings(probe: &Probe, out: &Path, card: bool) -> Settings {
+    Settings {
         start: 0.0,
         end: None,
         cuts: Vec::new(),
         speed: 1.0,
-        video,
+        video: probe.video.is_some(),
         audio: probe.audio,
         height: probe.video.filter(|v| v.short_side() > 480).map(|_| 480),
         fps: probe.video.map_or(30.0, |v| v.fps),
         rate: None,
-        container,
+        container: preview_container(probe),
         audio_codec: AudioCodec::Aac,
         video_kbps: 2000,
         audio_kbps: 128,
         exact: false,
         stats: out.with_extension("log"),
-        preset: Preset::Veryfast,
+        encoder: Encoder::H264(H264Preset::Veryfast),
         draft: true,
-    };
-    Ffmpeg { stop }.transcode(input, out, &settings, progress)
+        card,
+        fragments: false,
+    }
 }
 
 fn create(path: &Path, container: Container) -> Result<format::context::Output> {
@@ -519,9 +653,13 @@ fn set_tag(stream: &mut format::stream::StreamMut, container: Container) {
     }
 }
 
-fn write_header(output: &mut format::context::Output, container: Container) -> Result<()> {
+/// With `fragments`, an MP4 in fragments, each one playable as soon as it is read (by the
+/// webview's Media Source).
+fn write_header(output: &mut format::context::Output, container: Container, fragments: bool) -> Result<()> {
     let mut options = Dictionary::new();
-    if container.faststart() {
+    if fragments {
+        options.set("movflags", "frag_keyframe+empty_moov+default_base_moof");
+    } else if container.faststart() {
         options.set("movflags", "+faststart");
     }
     output.write_header_with(options).context("write header")?;
@@ -595,6 +733,21 @@ mod tests {
     }
 
     #[test]
+    fn mends_a_clock_that_restarts() {
+        // Two HLS segments joined, the second's clock starting over: one 2 s file.
+        let joined = Temp::new("joined.ts");
+        let clip = std::fs::read(fixture("clip.ts")).unwrap();
+        std::fs::write(&joined.0, [clip.as_slice(), &clip].concat()).unwrap();
+        let out = Temp::new("mended.mp4");
+        remux(&out.0, Container::Mp4, &[(joined.0.clone(), Kind::Video), (joined.0.clone(), Kind::Audio)], &[]).unwrap();
+        let probe = super::probe(&out.0).unwrap();
+        assert!((probe.duration - 2.0).abs() < 0.1, "{probe:?}");
+        // The cut points follow on too.
+        let points = cut_points(&joined.0).unwrap();
+        assert!(points.iter().any(|&p| (p - 1.0).abs() < 0.1) && points.iter().all(|&p| p < 2.1), "{points:?}");
+    }
+
+    #[test]
     fn cuts_at_keyframes() {
         // A keyframe every second; B-frames, so the picture is stored out of order.
         let tracks = [(fixture("clip-gop.mp4"), Kind::Video), (fixture("clip-gop.mp4"), Kind::Audio)];
@@ -621,7 +774,7 @@ mod tests {
         let mkv = Temp::new("clip.mkv");
         remux(&mkv.0, Container::Mkv, &[(fixture("clip.ts"), Kind::Video), (fixture("clip.ts"), Kind::Audio)], &[]).unwrap();
         let out = Temp::new("preview.mp4");
-        preview(&mkv.0, &out.0, &super::probe(&mkv.0).unwrap(), &|| false, &mut |_| {}).unwrap();
+        assert!(preview(&mkv.0, &out.0, &super::probe(&mkv.0).unwrap(), &|| false, &mut |_| {}).unwrap());
         let probe = super::probe(&out.0).unwrap();
         assert_eq!((probe.video.unwrap().codec, probe.audio_codec), (Some(VideoCodec::H264), Some(AudioCodec::Aac)));
         // FLAC sound: re-encoded to AAC.
@@ -630,8 +783,24 @@ mod tests {
         Ffmpeg { stop: &|| false }.transcode(&fixture("clip.ts"), &flac.0, &s, &mut |_| {}).unwrap();
         let out = Temp::new("preview.m4a");
         let mut shown = Vec::new();
-        preview(&flac.0, &out.0, &super::probe(&flac.0).unwrap(), &|| false, &mut |f| shown.push(f)).unwrap();
+        assert!(preview(&flac.0, &out.0, &super::probe(&flac.0).unwrap(), &|| false, &mut |f| shown.push(f)).unwrap());
         assert!(shown.last().is_some_and(|&f| f > 0.9), "{shown:?}");
         assert_eq!(super::probe(&out.0).unwrap().audio_codec, Some(AudioCodec::Aac));
+    }
+
+    #[test]
+    fn preview_parts() {
+        // An HEVC video: played in parts, each a fragmented MP4 of the seconds asked for.
+        let probe = super::probe(&fixture("clip.ts")).unwrap();
+        let hevc = Probe { video: probe.video.map(|v| VideoProbe { codec: Some(VideoCodec::H265), ..v }), ..probe };
+        let out = Temp::new("preview.mp4");
+        assert!(!preview(&fixture("clip.ts"), &out.0, &hevc, &|| false, &mut |_| {}).unwrap());
+        let part = Temp::new("part.mp4");
+        preview_part(&fixture("clip.ts"), &part.0, &probe, 0.2, 0.5, false, &|| false).unwrap();
+        let bytes = std::fs::read(&part.0).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"moof"), "not in fragments");
+        let made = super::probe(&part.0).unwrap();
+        assert!((made.duration - 0.5).abs() < 0.1, "{}", made.duration);
+        assert!(made.audio);
     }
 }

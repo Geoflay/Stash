@@ -1,6 +1,6 @@
 fn main() {
-    // FFmpeg's own libraries are linked by ffmpeg-sys-next; the encoders, dav1d (the AV1
-    // decoder), zlib and the system libraries they use are linked here. All come from
+    // FFmpeg's own libraries are linked by ffmpeg-sys-next; the encoders (x264, SVT-AV1 and
+    // its fastfeat, LAME), dav1d (the AV1 decoder), zlib and the system libraries they use are linked here. All come from
     // ffmpeg/build.sh.
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     let dir = std::env::var("FFMPEG_DIR").expect("FFMPEG_DIR is not set: run ffmpeg/build.sh");
@@ -8,12 +8,28 @@ fn main() {
     let arch = if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") { "arm64" } else { "x64" };
     println!("cargo:rustc-link-search=native={dir}/lib/{arch}");
     let libraries: &[&str] = match target.as_str() {
-        "windows" => &["static=libx264", "static=dav1d", "static=libmp3lame-static", "static=libmpghip-static", "static=zlib", "mfuuid", "ole32", "strmiids", "user32", "bcrypt", "secur32", "ncrypt", "crypt32", "ws2_32"],
-        "android" => &["static=x264", "static=dav1d", "static=mp3lame", "static=z", "mediandk", "android"],
+        "windows" => &["static=libx264", "static=SvtAv1Enc", "static=fastfeat", "static=dav1d", "static=libmp3lame-static", "static=libmpghip-static", "static=zlib", "mfuuid", "ole32", "strmiids", "user32", "bcrypt", "secur32", "ncrypt", "crypt32", "ws2_32"],
+        "android" => &["static=x264", "static=SvtAv1Enc", "static=fastfeat", "static=dav1d", "static=mp3lame", "static=z", "mediandk", "android"],
         _ => &[],
     };
     for library in libraries {
         println!("cargo:rustc-link-lib={library}");
     }
+    explorer_extensions();
     tauri_build::build()
+}
+
+/// The files Explorer's "Edit with Stash" shows on, for the installer (windows/hooks.nsh):
+/// those the Edit tab opens.
+fn explorer_extensions() {
+    let list = "../src/features/edit/extensions.json";
+    println!("cargo:rerun-if-changed={list}");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(list).unwrap()).unwrap();
+    // A macro calling MACRO for every extension.
+    let mut nsh = String::from("; Written by build.rs from src/features/edit/extensions.json.\n!macro STASH_EXTENSIONS MACRO\n");
+    for ext in ["video", "sound"].iter().flat_map(|kind| json[kind].as_array().unwrap()) {
+        nsh += &format!("  !insertmacro ${{MACRO}} \".{}\"\n", ext.as_str().unwrap());
+    }
+    nsh += "!macroend\n";
+    std::fs::write("windows/extensions.nsh", nsh).unwrap();
 }
